@@ -4,3 +4,8 @@ cline-proxy
 cline-proxy.exe
 cline-proxy.exe~
 .zcode/
+
+# desktop build artifacts
+desktop/build/
+cline-desktop
+cline-desktop.exe

@@ -42,6 +42,7 @@ type chatRequest struct {
 
 func startProxy(port int) error {
 	p := loadPool()
+	loadRequestLogs()
 	activeCount := 0
 	for _, a := range p.Accounts {
 		if a.Status == "active" {
@@ -171,6 +172,8 @@ func startProxy(port int) error {
 		model, _ := params["model"].(string)
 		log.Printf("  client: stream=%v tools=%d model=%s", isStream, toolCount, model)
 
+		reqLog := RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: model, Stream: isStream}
+
 		// Override system prompt from override.md for OpenAI format
 		if override := loadOverrideContent(); override != "" {
 			if msgs, ok := params["messages"].([]any); ok {
@@ -193,17 +196,22 @@ func startProxy(port int) error {
 		resp, acc, err := callClineAPI(params, isStream)
 		if err != nil {
 			log.Printf("  api error: %v", err)
+			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"error": map[string]string{"message": err.Error(), "type": "api_error"},
 			})
 			return
 		}
 		defer resp.Body.Close()
+		if acc != nil {
+			reqLog.AccountID = acc.AccountID
+			reqLog.AccountEmail = acc.Email
+		}
 
 		if isStream {
-			handleStreamResponse(w, resp, acc)
+			handleStreamResponse(w, resp, acc, &reqLog)
 		} else {
-			handleNonStreamResponse(w, resp, acc)
+			handleNonStreamResponse(w, resp, acc, &reqLog)
 		}
 	})
 	mux.HandleFunc("/v1/chat/completions", chatHandler)
@@ -342,7 +350,10 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 	if acc == nil {
 		return nil, nil, fmt.Errorf("no active accounts available. Use --login or admin API to add accounts")
 	}
+	return callClineAPIWithAccount(acc, params, stream)
+}
 
+func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (*http.Response, *Account, error) {
 	token, err := ensureAccountToken(acc)
 	if err != nil {
 		// Try other accounts
@@ -419,6 +430,77 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 	return resp, acc, nil
 }
 
+type accountTestResult struct {
+	AccountID    string `json:"accountId"`
+	Email        string `json:"email"`
+	OK           bool   `json:"ok"`
+	DurationMs   int64  `json:"durationMs"`
+	InputTokens  int64  `json:"inputTokens"`
+	OutputTokens int64  `json:"outputTokens"`
+	Error        string `json:"error,omitempty"`
+}
+
+// testAccount sends a minimal "hi" request through a specific account to verify
+// it can complete an upstream call. It does not update aggregate token counters
+// or request logs; it is a diagnostic-only probe.
+func testAccount(acc *Account) accountTestResult {
+	result := accountTestResult{AccountID: acc.AccountID, Email: acc.Email}
+	started := time.Now()
+
+	params := map[string]any{
+		"model":      defaultModel,
+		"max_tokens": 16,
+		"stream":     false,
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hi"},
+		},
+	}
+
+	resp, _, err := callClineAPIWithAccount(acc, params, false)
+	if err != nil {
+		result.DurationMs = time.Since(started).Milliseconds()
+		result.Error = truncate(err.Error(), 200)
+		return result
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		result.DurationMs = time.Since(started).Milliseconds()
+		result.Error = "read response: " + truncate(err.Error(), 200)
+		return result
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		result.DurationMs = time.Since(started).Milliseconds()
+		result.Error = "decode response: " + truncate(err.Error(), 200)
+		return result
+	}
+	if data, ok := obj["data"]; ok {
+		if d, ok := data.(map[string]any); ok {
+			obj = d
+		}
+	}
+	obj = normalizeOpenAIResponse(obj)
+	usage := parseTokenUsage(obj["usage"])
+
+	result.OK = true
+	result.DurationMs = time.Since(started).Milliseconds()
+	if usage.Valid {
+		result.InputTokens = usage.Prompt
+		result.OutputTokens = usage.Completion
+	}
+	// If the account was in cooldown/expired but the test succeeded, restore it.
+	if acc.Status != "active" {
+		poolMu.Lock()
+		acc.Status = "active"
+		poolMu.Unlock()
+		savePool()
+	}
+	return result
+}
+
 type tokenUsage struct {
 	Prompt     int64
 	Completion int64
@@ -454,12 +536,16 @@ func parseTokenUsage(value any) tokenUsage {
 	}
 	prompt := read("prompt_tokens", "input_tokens")
 	completion := read("completion_tokens", "output_tokens")
-	cached := read("cache_read_input_tokens") + read("cache_creation_input_tokens")
-	if cached == 0 {
+	cached := int64(0)
+	if nested := readNested("prompt_tokens_details", "cached_tokens"); nested > 0 {
+		cached = nested
+	} else if nested := readNested("input_tokens_details", "cached_tokens"); nested > 0 {
+		cached = nested
+	} else if v := read("cache_read_input_tokens") + read("cache_creation_input_tokens"); v > 0 {
+		cached = v
+	} else {
 		cached = read("prompt_cache_hit_tokens", "prompt_cache_creation_tokens", "cached_tokens")
 	}
-	cached += readNested("prompt_tokens_details", "cached_tokens")
-	cached += readNested("input_tokens_details", "cached_tokens")
 	total := read("total_tokens")
 	if total == 0 {
 		total = prompt + completion
@@ -556,7 +642,7 @@ func getMsgCount(params map[string]any) int {
 	return 0
 }
 
-func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *Account) {
+func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -571,6 +657,7 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 
 	reader := bufio.NewReader(upstream.Body)
 	var latestUsage tokenUsage
+	var firstOutputAt time.Time
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -610,6 +697,9 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 				if usage := parseTokenUsage(normalized["usage"]); usage.Valid {
 					latestUsage = mergeTokenUsage(latestUsage, usage)
 				}
+				if firstOutputAt.IsZero() && hasFirstOutput(normalized) {
+					firstOutputAt = time.Now()
+				}
 				if normBytes, err := json.Marshal(normalized); err == nil {
 					w.Write([]byte("data: " + string(normBytes) + "\n\n"))
 					flusher.Flush()
@@ -622,11 +712,41 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 		flusher.Flush()
 	}
 	recordTokenUsage(acc, latestUsage)
+	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
 }
 
-func handleNonStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *Account) {
+func hasFirstOutput(obj map[string]any) bool {
+	choices, ok := getNested(obj, "choices").([]any)
+	if !ok || len(choices) == 0 {
+		return false
+	}
+	choice, _ := choices[0].(map[string]any)
+	if choice == nil {
+		return false
+	}
+	if delta, ok := choice["delta"].(map[string]any); ok {
+		if c, _ := delta["content"].(string); c != "" {
+			return true
+		}
+		if tc, ok := delta["tool_calls"].([]any); ok && len(tc) > 0 {
+			return true
+		}
+	}
+	if msg, ok := choice["message"].(map[string]any); ok {
+		if c, _ := msg["content"].(string); c != "" {
+			return true
+		}
+		if tc, ok := msg["tool_calls"].([]any); ok && len(tc) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func handleNonStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog) {
 	var raw map[string]any
 	if err := json.NewDecoder(upstream.Body).Decode(&raw); err != nil {
+		finalizeRequestLog(reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error": map[string]string{"message": err.Error(), "type": "parse_error"},
 		})
@@ -642,7 +762,9 @@ func handleNonStreamResponse(w http.ResponseWriter, upstream *http.Response, acc
 	}
 
 	out = normalizeOpenAIResponse(out)
-	recordTokenUsage(acc, parseTokenUsage(out["usage"]))
+	usage := parseTokenUsage(out["usage"])
+	recordTokenUsage(acc, usage)
+	finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 
 	if msg, ok := getNested(out, "choices", 0, "message").(map[string]any); ok {
 		tc, _ := msg["tool_calls"].([]any)
@@ -970,6 +1092,8 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("  anthropic: model=%s stream=%v msgs=%d", req.Model, req.Stream, len(req.Messages))
 
+	reqLog := RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: req.Model, Stream: req.Stream}
+
 	activeCount := 0
 	p := loadPool()
 	for _, a := range p.Accounts {
@@ -991,18 +1115,24 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	resp, acc, err := callClineAPI(openAIReq, req.Stream)
 	if err != nil {
 		log.Printf("  anthropic api error: %v", err)
+		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error": map[string]string{"message": err.Error(), "type": "api_error"},
 		})
 		return
 	}
 	defer resp.Body.Close()
+	if acc != nil {
+		reqLog.AccountID = acc.AccountID
+		reqLog.AccountEmail = acc.Email
+	}
 
 	if req.Stream {
-		handleAnthropicStream(w, resp, acc)
+		handleAnthropicStream(w, resp, acc, &reqLog)
 	} else {
 		var raw map[string]any
 		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
 				"error": map[string]string{"message": err.Error(), "type": "parse_error"},
 			})
@@ -1015,7 +1145,9 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out = normalizeOpenAIResponse(out)
-		recordTokenUsage(acc, parseTokenUsage(out["usage"]))
+		usage := parseTokenUsage(out["usage"])
+		recordTokenUsage(acc, usage)
+		finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 		anthropicResp := openAIToAnthropic(out)
 
 		if tc, ok := getNested(out, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
@@ -1027,7 +1159,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *Account) {
+func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *Account, reqLog *RequestLog) {
 	log.Printf("  anthropic stream: starting real-time forward")
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1090,6 +1222,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 
 	reader := bufio.NewReader(upstream.Body)
 	var latestUsage tokenUsage
+	var firstOutputAt time.Time
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -1116,6 +1249,9 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		}
 		if usage := parseTokenUsage(obj["usage"]); usage.Valid {
 			latestUsage = mergeTokenUsage(latestUsage, usage)
+		}
+		if firstOutputAt.IsZero() && hasFirstOutput(obj) {
+			firstOutputAt = time.Now()
 		}
 
 		// Detect upstream SSE error
@@ -1234,6 +1370,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		},
 	})
 	recordTokenUsage(acc, latestUsage)
+	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
 
 	emit("message_stop", map[string]any{"type": "message_stop"})
 	log.Printf("  anthropic stream done: hasText=%v tools=%d reason=%s", hasText, len(pendingTools), stopReason)

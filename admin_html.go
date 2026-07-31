@@ -88,19 +88,32 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text'
 
 /* ===== Table ===== */
 table{width:100%;border-collapse:collapse;table-layout:fixed}
-th,td{text-align:left;padding:13px 16px;border-bottom:1px solid var(--border2);font-size:13px;vertical-align:middle}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border2);font-size:13px;vertical-align:middle}
+.section-body.flush{overflow-x:auto}
 th{color:var(--text2);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:0.4px;white-space:nowrap}
 tbody tr:last-child td{border-bottom:none}
 tbody tr{transition:background 0.15s var(--ease)}
 tbody tr:hover{background:var(--surface2)}
-.account-table th:first-child,.account-table td:first-child{width:18%}
-.account-table th:nth-child(2),.account-table td:nth-child(2){width:9%}
-.account-table th:nth-child(3),.account-table td:nth-child(3){width:6%}
-.account-table th:nth-child(4),.account-table td:nth-child(4),.account-table th:nth-child(5),.account-table td:nth-child(5),.account-table th:nth-child(6),.account-table td:nth-child(6),.account-table th:nth-child(7),.account-table td:nth-child(7){width:8%;text-align:right;font-variant-numeric:tabular-nums}
-.account-table th:nth-child(8),.account-table td:nth-child(8),.account-table th:nth-child(9),.account-table td:nth-child(9){width:13%;white-space:nowrap;color:var(--text2)}
-.account-table th:last-child,.account-table td:last-child{width:7%;text-align:right;white-space:nowrap}
+.account-table th:first-child,.account-table td:first-child{width:16%}
+.account-table th:nth-child(2),.account-table td:nth-child(2){width:8%}
+.account-table th:nth-child(3),.account-table td:nth-child(3){width:5%}
+.account-table th:nth-child(4),.account-table td:nth-child(4),.account-table th:nth-child(5),.account-table td:nth-child(5),.account-table th:nth-child(6),.account-table td:nth-child(6),.account-table th:nth-child(7),.account-table td:nth-child(7){width:7%;text-align:right;font-variant-numeric:tabular-nums}
+.account-table th:nth-child(8),.account-table td:nth-child(8),.account-table th:nth-child(9),.account-table td:nth-child(9){width:11%;white-space:nowrap;color:var(--text2)}
+.account-table th:last-child,.account-table td:last-child{width:120px;min-width:120px;text-align:right;white-space:nowrap}
+.account-table td:last-child .btn{width:32px;padding-left:0;padding-right:0;justify-content:center}
 .account-email{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-weight:500}
 .account-cards{display:none}
+.log-cards{display:none}
+.log-table th:first-child,.log-table td:first-child{width:14%;white-space:nowrap;color:var(--text2)}
+.log-table th:nth-child(2),.log-table td:nth-child(2){width:16%}
+.log-table th:nth-child(3),.log-table td:nth-child(3){width:7%}
+.log-table th:nth-child(4),.log-table td:nth-child(4){width:15%}
+.log-table th:nth-child(5),.log-table td:nth-child(5),.log-table th:nth-child(6),.log-table td:nth-child(6),.log-table th:nth-child(7),.log-table td:nth-child(7),.log-table th:nth-child(8),.log-table td:nth-child(8){width:6%;text-align:right;font-variant-numeric:tabular-nums}
+.log-table th:nth-child(9),.log-table td:nth-child(9),.log-table th:nth-child(10),.log-table td:nth-child(10),.log-table th:nth-child(11),.log-table td:nth-child(11){width:6%;text-align:right;font-variant-numeric:tabular-nums}
+.log-table th:last-child,.log-table td:last-child{width:6%;text-align:right;white-space:nowrap}
+.log-status{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600}
+.log-status.ok{background:var(--green-soft);color:var(--green)}
+.log-status.fail{background:var(--red-soft);color:var(--red)}
 
 /* ===== Status badges ===== */
 .status{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600}
@@ -204,8 +217,8 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   .form-row .field{margin-bottom:14px}
   .form-actions,.action-row{gap:8px}
 	  table{min-width:680px}
-	  .section-body.flush{overflow-x:auto}
-	  th,td{padding:11px 12px}
+  .section-body.flush{overflow-x:auto}
+  th,td{padding:11px 12px}
 	  .toast{max-width:calc(100vw - 32px);width:max-content;text-align:center}
 	}
 	@media (min-width:761px) and (max-width:1180px){
@@ -214,7 +227,11 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 	  .cards.tokens{grid-template-columns:repeat(3,minmax(0,1fr))}
 	  .account-table th:nth-child(9),.account-table td:nth-child(9){display:none}
 	}
-	@media (max-width:700px){
+	@media (max-width:760px){
+	  .log-table{display:none}
+	  .log-cards{display:grid;gap:10px;padding:12px}
+	}
+	@media (max-width:760px){
 	  .account-table{display:none}
 	  .account-cards{display:grid;gap:10px;padding:12px}
 	  .account-card{border:1px solid var(--border2);border-radius:12px;padding:14px;background:var(--surface2)}
@@ -260,6 +277,10 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     <div class="nav-item" data-tab="import">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       <span class="nav-label">导入账号</span>
+    </div>
+    <div class="nav-item" data-tab="logs">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
+      <span class="nav-label">请求日志</span>
     </div>
     <div class="nav-item" data-tab="settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -339,6 +360,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <div class="large-subtitle">管理 Cline 账号池中的所有账号</div>
     </div>
     <div style="display:flex;gap:8px">
+      <button class="btn btn-sm" onclick="testAllAccounts(this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>测试全部</button>
       <button class="btn btn-primary btn-sm" onclick="switchTab('import')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加</button>
       <button class="btn btn-sm" onclick="loadAccounts()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>刷新</button>
     </div>
@@ -421,6 +443,34 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       </div>
       <div id="batchResult" style="margin-top:8px"></div>
     </div>
+  </div>
+</div>
+
+<div id="tab-logs" class="tab-panel" style="display:none">
+  <div class="page-header">
+    <div>
+      <div class="large-title">请求日志</div>
+      <div class="large-subtitle">查看每次请求的 Token 消耗、缓存、耗时与流式速度</div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-sm" onclick="loadRequestLogs(true)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>刷新</button>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-body flush">
+      <table class="log-table">
+        <thead>
+          <tr><th>时间</th><th>账号</th><th>协议</th><th>模型</th><th>输入</th><th>输出</th><th>缓存</th><th>总</th><th>耗时</th><th>TTFT</th><th>tok/s</th><th>状态</th></tr>
+        </thead>
+        <tbody id="logTableBody">
+          <tr><td colspan="12" class="empty">加载中...</td></tr>
+        </tbody>
+      </table>
+      <div id="logCards" class="log-cards"></div>
+    </div>
+  </div>
+  <div id="logLoadMore" style="display:none;text-align:center;padding:16px">
+    <button class="btn btn-primary" onclick="loadRequestLogs(false)">加载更多</button>
   </div>
 </div>
 
@@ -539,6 +589,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     _('tab-' + el.dataset.tab).style.display = 'block';
     if (el.dataset.tab === 'dashboard') { loadStats(); loadAccounts(); }
     if (el.dataset.tab === 'accounts') loadAccounts();
+    if (el.dataset.tab === 'logs') loadRequestLogs(true);
     if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); }
   });
 });
@@ -551,6 +602,7 @@ function switchTab(name) {
   _('tab-' + name).style.display = 'block';
   if (name === 'dashboard') { loadStats(); loadAccounts(); }
   if (name === 'accounts') loadAccounts();
+  if (name === 'logs') loadRequestLogs(true);
   if (name === 'settings') { loadKeys(); loadModels(); }
 }
 
@@ -619,6 +671,7 @@ async function loadAccounts() {
         '<td class="mono" style="font-size:11px">' + lu + '</td>' +
         '<td class="mono" style="font-size:11px">' + cr + '</td>' +
         '<td style="white-space:nowrap">' +
+          '<button class="btn btn-sm" onclick="testAccount(\'' + a.accountId + '\',this)" title="测试">⚡</button> ' +
           '<button class="btn btn-sm" onclick="resetAccount(\'' + a.accountId + '\')" title="重置">↻</button> ' +
           '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.accountId + '\')" title="删除">✕</button>' +
         '</td></tr>';
@@ -636,11 +689,49 @@ async function loadAccounts() {
           '<div class="account-metric"><span class="account-metric-label">输出</span><span class="account-metric-value">' + formatTokenCount(a.completionTokens) + '</span></div>' +
         '</div>' +
         '<div class="account-card-footer"><span>最后使用：' + lu + '</span><span class="account-card-actions">' +
+          '<button class="btn btn-sm" onclick="testAccount(\'' + a.accountId + '\',this)" title="测试">⚡</button>' +
           '<button class="btn btn-sm" onclick="resetAccount(\'' + a.accountId + '\')" title="重置">↻</button>' +
           '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.accountId + '\')" title="删除">✕</button>' +
         '</span></div></article>';
     }).join('');
   } catch (e) { toast('加载账号失败: ' + e.message, 'error'); }
+}
+
+async function testAccount(id, btn) {
+  const orig = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading"></span>'; }
+  try {
+    const d = await api('POST', '/accounts/test', { accountId: id });
+    const r = (d.data.results || [])[0];
+    if (r && r.ok) {
+      const tok = r.inputTokens || r.outputTokens ? ' · 输入 ' + formatTokenCount(r.inputTokens) + ' · 输出 ' + formatTokenCount(r.outputTokens) : '';
+      toast('测试成功：' + esc(r.email) + ' · ' + formatDuration(r.durationMs) + tok, 'success');
+    } else {
+      toast('测试失败：' + esc(r ? r.email : '?') + ' · ' + (r ? r.error : '未知错误'), 'error');
+    }
+    loadAccounts(); loadStats();
+  } catch (e) { toast('测试失败: ' + e.message, 'error'); }
+  if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+}
+
+async function testAllAccounts(btn) {
+  const orig = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading"></span> 测试中...'; }
+  toast('正在测试全部账号，请稍候...', 'info');
+  try {
+    const d = await api('POST', '/accounts/test', {});
+    const results = d.data.results || [];
+    const ok = results.filter(r => r.ok).length;
+    const fail = results.length - ok;
+    if (fail === 0) {
+      toast('全部测试通过：' + ok + '/' + results.length + ' 个账号正常', 'success');
+    } else {
+      const failed = results.filter(r => !r.ok).map(r => esc(r.email) + '(' + r.error + ')').join('，');
+      toast('测试完成：' + ok + ' 成功 / ' + fail + ' 失败 · ' + failed, 'error');
+    }
+    loadAccounts(); loadStats();
+  } catch (e) { toast('测试失败: ' + e.message, 'error'); }
+  if (btn) { btn.disabled = false; btn.innerHTML = orig; }
 }
 
 async function deleteAccount(id) {
@@ -653,7 +744,7 @@ async function deleteAccount(id) {
 }
 
 async function resetAccount(id) {
-  if (!confirm('确定重置此账号？将清除请求与 Token 统计并刷新 Token。')) return;
+  if (!confirm('确定重置此账号？将恢复为活跃状态并刷新 Token，保留历史统计。')) return;
   try {
     await api('POST', '/accounts/reset', { accountId: id });
     toast('账号已重置', 'success');
@@ -905,6 +996,85 @@ async function loadConfig() {
       ).join('');
     }
   } catch (e) { /* ignore */ }
+}
+
+// ========== 请求日志 ==========
+let logCursor = '';
+let logHasMore = false;
+
+const formatDuration = ms => {
+  if (!ms || ms <= 0) return '-';
+  if (ms < 1000) return ms + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
+};
+const formatTPS = v => (!v || v <= 0) ? '-' : v.toFixed(1);
+
+async function loadRequestLogs(reset) {
+  if (reset) logCursor = '';
+  const cursor = logCursor;
+  try {
+    const path = '/request-logs?limit=50' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
+    const d = await api('GET', path);
+    const page = d.data;
+    const items = page.items || [];
+    logHasMore = !!page.hasMore;
+    logCursor = page.nextCursor || '';
+    _('logLoadMore').style.display = logHasMore ? 'block' : 'none';
+
+    const tbody = _('logTableBody');
+    const cards = _('logCards');
+    if (reset && (!items || items.length === 0)) {
+      tbody.innerHTML = '<tr><td colspan="12" class="empty">暂无请求日志</td></tr>';
+      cards.innerHTML = '<div class="empty">暂无请求日志</div>';
+      return;
+    }
+
+    const renderRow = l => {
+      const t = l.startedAt ? new Date(l.startedAt).toLocaleString('zh-CN') : '-';
+      const st = l.completed
+        ? '<span class="log-status ok">完成</span>'
+        : '<span class="log-status fail" title="' + esc(l.error || '') + '">失败</span>';
+      const tk = l.usageAvailable
+        ? formatTokenCount(l.inputTokens) + '</td><td>' + formatTokenCount(l.outputTokens) + '</td><td>' + formatTokenCount(l.cachedTokens) + '</td><td>' + formatTokenCount(l.totalTokens)
+        : '-</td><td>-</td><td>-</td><td>-';
+      return '<tr>' +
+        '<td class="mono" style="font-size:11px">' + t + '</td>' +
+        '<td>' + esc(l.accountEmail || '-') + '</td>' +
+        '<td>' + esc(l.protocol || '-') + '</td>' +
+        '<td class="mono" style="font-size:11px">' + esc(l.model || '-') + '</td>' +
+        '<td>' + tk + '</td>' +
+        '<td>' + formatDuration(l.durationMs) + '</td>' +
+        '<td>' + (l.ttftMs ? formatDuration(l.ttftMs) : '-') + '</td>' +
+        '<td>' + formatTPS(l.outputTokensPerSecond) + '</td>' +
+        '<td>' + st + '</td></tr>';
+    };
+    const renderCard = l => {
+      const t = l.startedAt ? new Date(l.startedAt).toLocaleString('zh-CN') : '-';
+      const st = l.completed ? '完成' : '失败';
+      const tk = l.usageAvailable
+        ? '输入 ' + formatTokenCount(l.inputTokens) + ' · 输出 ' + formatTokenCount(l.outputTokens) + ' · 缓存 ' + formatTokenCount(l.cachedTokens) + ' · 总 ' + formatTokenCount(l.totalTokens)
+        : 'Token 未知';
+      return '<article class="account-card">' +
+        '<div class="account-card-header"><span class="account-email">' + esc(l.accountEmail || '-') + '</span><span class="log-status ' + (l.completed ? 'ok' : 'fail') + '">' + st + '</span></div>' +
+        '<div class="account-metrics">' +
+          '<div class="account-metric"><span class="account-metric-label">协议</span><span class="account-metric-value">' + esc(l.protocol || '-') + '</span></div>' +
+          '<div class="account-metric"><span class="account-metric-label">耗时</span><span class="account-metric-value">' + formatDuration(l.durationMs) + '</span></div>' +
+          '<div class="account-metric"><span class="account-metric-label">TTFT</span><span class="account-metric-value">' + (l.ttftMs ? formatDuration(l.ttftMs) : '-') + '</span></div>' +
+          '<div class="account-metric"><span class="account-metric-label">tok/s</span><span class="account-metric-value">' + formatTPS(l.outputTokensPerSecond) + '</span></div>' +
+        '</div>' +
+        '<div style="font-size:12px;color:var(--text2);margin-bottom:8px">' + tk + '</div>' +
+        '<div class="account-card-footer"><span class="mono" style="font-size:11px">' + t + '</span><span class="mono" style="font-size:11px">' + esc(l.model || '-') + '</span></div>' +
+      '</article>';
+    };
+
+    if (reset) {
+      tbody.innerHTML = items.map(renderRow).join('');
+      cards.innerHTML = items.map(renderCard).join('');
+    } else {
+      tbody.insertAdjacentHTML('beforeend', items.map(renderRow).join(''));
+      cards.insertAdjacentHTML('beforeend', items.map(renderCard).join(''));
+    }
+  } catch (e) { toast('加载日志失败: ' + e.message, 'error'); }
 }
 
 // ========== 初始化 ==========

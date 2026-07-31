@@ -30,6 +30,10 @@ go run . -start
 
 启动后访问 http://127.0.0.1:3457/admin/ 进入管理后台。
 
+### 桌面版（分享给他人）
+
+`desktop/` 目录提供独立的跨平台桌面壳（Wails）：双击 `cline-desktop` 即启动本地服务并在内置窗口中打开管理后台，关闭窗口自动停止服务。构建与发布说明见 [desktop/README.md](desktop/README.md)。
+
 ### Docker 部署
 
 ```bash

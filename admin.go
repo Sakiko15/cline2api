@@ -54,12 +54,14 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/accounts/refresh-all", corsHandler(handleAdminRefreshAll))
 	mux.HandleFunc("/admin/api/accounts/delete-all", corsHandler(handleAdminDeleteAll))
 	mux.HandleFunc("/admin/api/accounts/reset", corsHandler(handleAdminAccountReset))
+	mux.HandleFunc("/admin/api/accounts/test", corsHandler(handleAdminAccountTest))
 	mux.HandleFunc("/admin/api/keys", corsHandler(handleAdminGetKeys))
 	mux.HandleFunc("/admin/api/keys/generate", corsHandler(handleAdminGenerateKey))
 	mux.HandleFunc("/admin/api/keys/delete", corsHandler(handleAdminDeleteKey))
 	mux.HandleFunc("/admin/api/models", corsHandler(handleAdminModels))
 	mux.HandleFunc("/admin/api/config", corsHandler(handleAdminConfig))
 	mux.HandleFunc("/admin/api/config/update", corsHandler(handleAdminUpdateConfig))
+	mux.HandleFunc("/admin/api/request-logs", corsHandler(handleAdminRequestLogs))
 }
 
 func adminStaticHandler(w http.ResponseWriter, r *http.Request) {
@@ -523,19 +525,59 @@ func handleAdminAccountReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reset status to active and refresh token
+	// Reset status to active and refresh token, but preserve usage/token statistics.
 	acc.Status = "active"
-	acc.UsageCount = 0
-	acc.PromptTokens = 0
-	acc.CompletionTokens = 0
-	acc.TotalTokens = 0
-	acc.CachedTokens = 0
 	if err := refreshAccountToken(acc); err != nil {
 		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: "reset failed: " + err.Error()})
 		return
 	}
 
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "Account reset"})
+}
+
+// POST /admin/api/accounts/test  body: { accountId?: "" }
+func handleAdminAccountTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		AccountID string `json:"accountId"`
+	}
+	_ = json.Unmarshal(body, &req)
+
+	p := loadPool()
+	var targets []*Account
+	if req.AccountID != "" {
+		acc := getAccountByID(req.AccountID)
+		if acc == nil {
+			writeAPI(w, http.StatusNotFound, apiResponse{Error: "account not found"})
+			return
+		}
+		targets = []*Account{acc}
+	} else {
+		poolMu.Lock()
+		targets = make([]*Account, len(p.Accounts))
+		copy(targets, p.Accounts)
+		poolMu.Unlock()
+	}
+
+	results := make([]accountTestResult, 0, len(targets))
+	for _, acc := range targets {
+		results = append(results, testAccount(acc))
+	}
+
+	writeAPI(w, http.StatusOK, apiResponse{
+		Success: true,
+		Data:    map[string]any{"results": results},
+	})
 }
 
 // Global proxy config (mutable via API)
@@ -750,4 +792,30 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			"version":          "go-1.1",
 		},
 	})
+}
+
+// GET /admin/api/request-logs?limit=50&cursor=...
+func handleAdminRequestLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
+
+	limit := requestLogDefaultLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil || n <= 0 {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid limit"})
+			return
+		}
+		limit = n
+	}
+	cursor := r.URL.Query().Get("cursor")
+
+	page, err := listRequestLogs(limit, cursor)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: page})
 }
