@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	defaultModel          = "cline-free/glm-5.2"
-	defaultMaxTokens      = 128000
+	defaultModel           = "cline-free/glm-5.2"
+	defaultMaxTokens       = 128000
 	defaultReasoningEffort = "high"
 )
 
@@ -28,16 +28,16 @@ var passThroughKeys = []string{
 }
 
 type chatRequest struct {
-	Model       string          `json:"model"`
-	Messages    json.RawMessage `json:"messages"`
-	Stream      bool            `json:"stream,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int    `json:"max_completion_tokens,omitempty"`
-	Tools       json.RawMessage `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
-	ReasoningEffort string     `json:"reasoning_effort,omitempty"`
-	ReasoningEffortAlt string  `json:"reasoningEffort,omitempty"`
-	Extra       map[string]any `json:"-"`
+	Model               string          `json:"model"`
+	Messages            json.RawMessage `json:"messages"`
+	Stream              bool            `json:"stream,omitempty"`
+	MaxTokens           int             `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int             `json:"max_completion_tokens,omitempty"`
+	Tools               json.RawMessage `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+	ReasoningEffortAlt  string          `json:"reasoningEffort,omitempty"`
+	Extra               map[string]any  `json:"-"`
 }
 
 func startProxy(port int) error {
@@ -63,8 +63,8 @@ func startProxy(port int) error {
 
 	mux.HandleFunc("/v1/health", corsHandler(func(w http.ResponseWriter, r *http.Request) {
 		info := map[string]any{
-			"status":       "ok",
-			"version":      "go-1.1",
+			"status":         "ok",
+			"version":        "go-1.1",
 			"activeAccounts": activeCount,
 		}
 		writeJSON(w, http.StatusOK, info)
@@ -190,7 +190,7 @@ func startProxy(port int) error {
 			}
 		}
 
-		resp, err := callClineAPI(params, isStream)
+		resp, acc, err := callClineAPI(params, isStream)
 		if err != nil {
 			log.Printf("  api error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -201,9 +201,9 @@ func startProxy(port int) error {
 		defer resp.Body.Close()
 
 		if isStream {
-			handleStreamResponse(w, resp)
+			handleStreamResponse(w, resp, acc)
 		} else {
-			handleNonStreamResponse(w, resp)
+			handleNonStreamResponse(w, resp, acc)
 		}
 	})
 	mux.HandleFunc("/v1/chat/completions", chatHandler)
@@ -290,9 +290,9 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	}
 
 	body := map[string]any{
-		"model":        model,
-		"max_tokens":   maxTokens,
-		"session_id":   sessionID,
+		"model":            model,
+		"max_tokens":       maxTokens,
+		"session_id":       sessionID,
 		"reasoning_effort": defaultReasoningEffort,
 	}
 
@@ -337,16 +337,16 @@ func clineHeaders(token, sessionID string) http.Header {
 	return h
 }
 
-func callClineAPI(params map[string]any, stream bool) (*http.Response, error) {
+func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
 	acc := pickAccount()
 	if acc == nil {
-		return nil, fmt.Errorf("no active accounts available. Use --login or admin API to add accounts")
+		return nil, nil, fmt.Errorf("no active accounts available. Use --login or admin API to add accounts")
 	}
 
 	token, err := ensureAccountToken(acc)
 	if err != nil {
 		// Try other accounts
-		return nil, fmt.Errorf("account %s token failed: %w", acc.Email, err)
+		return nil, acc, fmt.Errorf("account %s token failed: %w", acc.Email, err)
 	}
 
 	body := buildUpstreamBody(params, stream)
@@ -354,12 +354,12 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, error) {
 
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("marshal body: %w", err)
+		return nil, acc, fmt.Errorf("marshal body: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", clineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, acc, fmt.Errorf("create request: %w", err)
 	}
 	req.Header = clineHeaders(token, sessionID)
 
@@ -376,7 +376,7 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, error) {
 	if err != nil {
 		acc.Status = "cooldown"
 		savePool()
-		return nil, fmt.Errorf("upstream request: %w", err)
+		return nil, acc, fmt.Errorf("upstream request: %w", err)
 	}
 
 	if resp.StatusCode == 401 {
@@ -387,18 +387,18 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, error) {
 			req.Header = clineHeaders(token, sessionID)
 			resp, err = httpClient.Do(req)
 			if err != nil {
-				return nil, fmt.Errorf("upstream retry: %w", err)
+				return nil, acc, fmt.Errorf("upstream retry: %w", err)
 			}
 			if resp.StatusCode == 401 {
 				resp.Body.Close()
 				acc.Status = "expired"
 				savePool()
-				return nil, fmt.Errorf("account %s token expired permanently", acc.Email)
+				return nil, acc, fmt.Errorf("account %s token expired permanently", acc.Email)
 			}
 		} else {
 			acc.Status = "expired"
 			savePool()
-			return nil, fmt.Errorf("account %s refresh failed: %w", acc.Email, err)
+			return nil, acc, fmt.Errorf("account %s refresh failed: %w", acc.Email, err)
 		}
 	}
 
@@ -410,13 +410,120 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, error) {
 			acc.Status = "cooldown"
 			savePool()
 		}
-		return nil, fmt.Errorf("API %d: %s", resp.StatusCode, truncate(string(bodyBytes), 500))
+		return nil, acc, fmt.Errorf("API %d: %s", resp.StatusCode, truncate(string(bodyBytes), 500))
 	}
 
 	acc.LastUsed = time.Now()
 	acc.UsageCount++
 	savePool()
-	return resp, nil
+	return resp, acc, nil
+}
+
+type tokenUsage struct {
+	Prompt     int64
+	Completion int64
+	Total      int64
+	Cached     int64
+	Valid      bool
+}
+
+func parseTokenUsage(value any) tokenUsage {
+	usage, ok := value.(map[string]any)
+	if !ok {
+		return tokenUsage{}
+	}
+	read := func(keys ...string) int64 {
+		for _, key := range keys {
+			if value, ok := usage[key].(float64); ok && value >= 0 {
+				return int64(value)
+			}
+		}
+		return 0
+	}
+	readNested := func(parent string, keys ...string) int64 {
+		details, ok := usage[parent].(map[string]any)
+		if !ok {
+			return 0
+		}
+		for _, key := range keys {
+			if value, ok := details[key].(float64); ok && value >= 0 {
+				return int64(value)
+			}
+		}
+		return 0
+	}
+	prompt := read("prompt_tokens", "input_tokens")
+	completion := read("completion_tokens", "output_tokens")
+	cached := read("cache_read_input_tokens") + read("cache_creation_input_tokens")
+	if cached == 0 {
+		cached = read("prompt_cache_hit_tokens", "prompt_cache_creation_tokens", "cached_tokens")
+	}
+	cached += readNested("prompt_tokens_details", "cached_tokens")
+	cached += readNested("input_tokens_details", "cached_tokens")
+	total := read("total_tokens")
+	if total == 0 {
+		total = prompt + completion
+	}
+	_, hasUsage := usage["prompt_tokens"]
+	if !hasUsage {
+		_, hasUsage = usage["input_tokens"]
+		if !hasUsage {
+			if _, hasUsage = usage["completion_tokens"]; !hasUsage {
+				if _, hasUsage = usage["output_tokens"]; !hasUsage {
+					_, hasUsage = usage["total_tokens"]
+				}
+			}
+		}
+	}
+	if !hasUsage {
+		_, hasUsage = usage["cache_read_input_tokens"]
+		if !hasUsage {
+			_, hasUsage = usage["cache_creation_input_tokens"]
+			if !hasUsage {
+				_, hasUsage = usage["prompt_tokens_details"]
+				if !hasUsage {
+					_, hasUsage = usage["input_tokens_details"]
+				}
+			}
+		}
+	}
+	return tokenUsage{Prompt: prompt, Completion: completion, Total: total, Cached: cached, Valid: hasUsage}
+}
+
+func mergeTokenUsage(current, next tokenUsage) tokenUsage {
+	if !next.Valid {
+		return current
+	}
+	if next.Prompt != 0 {
+		current.Prompt = next.Prompt
+	}
+	if next.Completion != 0 {
+		current.Completion = next.Completion
+	}
+	if next.Total != 0 {
+		current.Total = next.Total
+	}
+	if next.Cached != 0 {
+		current.Cached = next.Cached
+	}
+	current.Valid = current.Valid || next.Valid
+	if current.Total == 0 && (current.Prompt != 0 || current.Completion != 0) {
+		current.Total = current.Prompt + current.Completion
+	}
+	return current
+}
+
+func recordTokenUsage(acc *Account, usage tokenUsage) {
+	if acc == nil || !usage.Valid {
+		return
+	}
+	poolMu.Lock()
+	acc.PromptTokens += usage.Prompt
+	acc.CompletionTokens += usage.Completion
+	acc.TotalTokens += usage.Total
+	acc.CachedTokens += usage.Cached
+	poolMu.Unlock()
+	savePool()
 }
 
 func truncateEmail(email string) string {
@@ -449,7 +556,7 @@ func getMsgCount(params map[string]any) int {
 	return 0
 }
 
-func handleStreamResponse(w http.ResponseWriter, upstream *http.Response) {
+func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *Account) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -463,6 +570,7 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response) {
 	}
 
 	reader := bufio.NewReader(upstream.Body)
+	var latestUsage tokenUsage
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -487,7 +595,7 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response) {
 			// Try to normalize the response
 			var obj map[string]any
 			if err := json.Unmarshal([]byte(payload), &obj); err == nil {
-				// Some Cline responses wrap in {data: {...}} 
+				// Some Cline responses wrap in {data: {...}}
 				if data, ok := obj["data"]; ok {
 					if d, ok := data.(map[string]any); ok {
 						if _, hasChoices := d["choices"]; hasChoices {
@@ -499,6 +607,9 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response) {
 					}
 				}
 				normalized := normalizeOpenAIResponse(obj)
+				if usage := parseTokenUsage(normalized["usage"]); usage.Valid {
+					latestUsage = mergeTokenUsage(latestUsage, usage)
+				}
 				if normBytes, err := json.Marshal(normalized); err == nil {
 					w.Write([]byte("data: " + string(normBytes) + "\n\n"))
 					flusher.Flush()
@@ -510,9 +621,10 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response) {
 		w.Write([]byte(line + "\n"))
 		flusher.Flush()
 	}
+	recordTokenUsage(acc, latestUsage)
 }
 
-func handleNonStreamResponse(w http.ResponseWriter, upstream *http.Response) {
+func handleNonStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *Account) {
 	var raw map[string]any
 	if err := json.NewDecoder(upstream.Body).Decode(&raw); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -530,6 +642,7 @@ func handleNonStreamResponse(w http.ResponseWriter, upstream *http.Response) {
 	}
 
 	out = normalizeOpenAIResponse(out)
+	recordTokenUsage(acc, parseTokenUsage(out["usage"]))
 
 	if msg, ok := getNested(out, "choices", 0, "message").(map[string]any); ok {
 		tc, _ := msg["tool_calls"].([]any)
@@ -741,10 +854,10 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 
 func openAIToAnthropic(openAI map[string]any) map[string]any {
 	out := map[string]any{
-		"id":      "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli()),
-		"type":    "message",
-		"role":    "assistant",
-		"model":   getNested(openAI, "model"),
+		"id":    "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli()),
+		"type":  "message",
+		"role":  "assistant",
+		"model": getNested(openAI, "model"),
 	}
 
 	choices := getNested(openAI, "choices")
@@ -875,7 +988,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := callClineAPI(openAIReq, req.Stream)
+	resp, acc, err := callClineAPI(openAIReq, req.Stream)
 	if err != nil {
 		log.Printf("  anthropic api error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -886,7 +999,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if req.Stream {
-		handleAnthropicStream(w, resp)
+		handleAnthropicStream(w, resp, acc)
 	} else {
 		var raw map[string]any
 		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
@@ -902,6 +1015,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out = normalizeOpenAIResponse(out)
+		recordTokenUsage(acc, parseTokenUsage(out["usage"]))
 		anthropicResp := openAIToAnthropic(out)
 
 		if tc, ok := getNested(out, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
@@ -913,7 +1027,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response) {
+func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *Account) {
 	log.Printf("  anthropic stream: starting real-time forward")
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -975,6 +1089,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response) {
 	}
 
 	reader := bufio.NewReader(upstream.Body)
+	var latestUsage tokenUsage
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -998,6 +1113,9 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response) {
 			if d, ok := data.(map[string]any); ok {
 				obj = d
 			}
+		}
+		if usage := parseTokenUsage(obj["usage"]); usage.Valid {
+			latestUsage = mergeTokenUsage(latestUsage, usage)
 		}
 
 		// Detect upstream SSE error
@@ -1112,9 +1230,10 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response) {
 			"stop_sequence": nil,
 		},
 		"usage": map[string]any{
-			"output_tokens": 0,
+			"output_tokens": latestUsage.Completion,
 		},
 	})
+	recordTokenUsage(acc, latestUsage)
 
 	emit("message_stop", map[string]any{"type": "message_stop"})
 	log.Printf("  anthropic stream done: hasText=%v tools=%d reason=%s", hasText, len(pendingTools), stopReason)

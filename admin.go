@@ -29,10 +29,10 @@ type oauthSessionState struct {
 }
 
 type apiResponse struct {
-	Success bool        `json:"success"`
-	Data    any         `json:"data,omitempty"`
-	Error   string      `json:"error,omitempty"`
-	Message string      `json:"message,omitempty"`
+	Success bool   `json:"success"`
+	Data    any    `json:"data,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 func writeAPI(w http.ResponseWriter, status int, resp apiResponse) {
@@ -82,9 +82,9 @@ func handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: true,
 		Data: map[string]any{
-			"accounts":   accounts,
-			"total":      len(accounts),
-			"poolIndex":  loadPool().CurrentIdx,
+			"accounts":  accounts,
+			"total":     len(accounts),
+			"poolIndex": loadPool().CurrentIdx,
 		},
 	})
 }
@@ -526,6 +526,10 @@ func handleAdminAccountReset(w http.ResponseWriter, r *http.Request) {
 	// Reset status to active and refresh token
 	acc.Status = "active"
 	acc.UsageCount = 0
+	acc.PromptTokens = 0
+	acc.CompletionTokens = 0
+	acc.TotalTokens = 0
+	acc.CachedTokens = 0
 	if err := refreshAccountToken(acc); err != nil {
 		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: "reset failed: " + err.Error()})
 		return
@@ -713,7 +717,13 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 
 	p := loadPool()
 	active, cooldown, expired := 0, 0, 0
+	var usageCount, promptTokens, completionTokens, totalTokens, cachedTokens int64
 	for _, a := range p.Accounts {
+		usageCount += a.UsageCount
+		promptTokens += a.PromptTokens
+		completionTokens += a.CompletionTokens
+		totalTokens += a.TotalTokens
+		cachedTokens += a.CachedTokens
 		switch a.Status {
 		case "active":
 			active++
@@ -727,12 +737,17 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: true,
 		Data: map[string]any{
-			"total":    len(p.Accounts),
-			"active":   active,
-			"cooldown": cooldown,
-			"expired":  expired,
-			"strategy": "round_robin",
-			"version":  "go-1.1",
+			"total":            len(p.Accounts),
+			"active":           active,
+			"cooldown":         cooldown,
+			"expired":          expired,
+			"usageCount":       usageCount,
+			"promptTokens":     promptTokens,
+			"completionTokens": completionTokens,
+			"totalTokens":      totalTokens,
+			"cachedTokens":     cachedTokens,
+			"strategy":         "round_robin",
+			"version":          "go-1.1",
 		},
 	})
 }

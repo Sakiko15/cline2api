@@ -25,18 +25,18 @@ func init() {
 }
 
 type CaptureEntry struct {
-	Step       int               `json:"step"`
-	Name       string            `json:"name"`
-	Timestamp  string            `json:"timestamp"`
-	Method     string            `json:"method"`
-	URL        string            `json:"url"`
-	ReqHeaders map[string]string `json:"req_headers"`
-	ReqBody    string            `json:"req_body"`
-	StatusCode int               `json:"status_code"`
+	Step        int               `json:"step"`
+	Name        string            `json:"name"`
+	Timestamp   string            `json:"timestamp"`
+	Method      string            `json:"method"`
+	URL         string            `json:"url"`
+	ReqHeaders  map[string]string `json:"req_headers"`
+	ReqBody     string            `json:"req_body"`
+	StatusCode  int               `json:"status_code"`
 	RespHeaders map[string]string `json:"resp_headers"`
-	RespBody   string            `json:"resp_body"`
-	Cookies    map[string]string `json:"cookies,omitempty"`
-	Notes      string            `json:"notes,omitempty"`
+	RespBody    string            `json:"resp_body"`
+	Cookies     map[string]string `json:"cookies,omitempty"`
+	Notes       string            `json:"notes,omitempty"`
 }
 
 func captureRequest(name, method, rawURL, reqBody string, headers map[string]string) (*CaptureEntry, error) {
@@ -84,6 +84,7 @@ func captureRequest(name, method, rawURL, reqBody string, headers map[string]str
 	// Send with verbose output
 	client := &http.Client{
 		Transport: &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: false},
 		},
 		Timeout: 60 * time.Second,
@@ -347,13 +348,13 @@ func doFullCapture() error {
 		"https://api.cline.bot/api/v1/auth/register",
 		registerBody,
 		map[string]string{
-			"Content-Type":  "application/json",
-			"User-Agent":    "Cline/3.0.47",
-			"HTTP-Referer":  "https://cline.bot",
-			"X-Title":       "Cline",
-			"X-CLIENT-TYPE": "cline-sdk",
+			"Content-Type":     "application/json",
+			"User-Agent":       "Cline/3.0.47",
+			"HTTP-Referer":     "https://cline.bot",
+			"X-Title":          "Cline",
+			"X-CLIENT-TYPE":    "cline-sdk",
 			"X-CLIENT-VERSION": "3.0.47",
-			"X-PLATFORM":    "terminal",
+			"X-PLATFORM":       "terminal",
 		},
 	)
 	if err != nil {
@@ -409,13 +410,13 @@ func doFullCapture() error {
 		"https://api.cline.bot/api/v1/auth/refresh",
 		refreshBody,
 		map[string]string{
-			"Content-Type":  "application/json",
-			"User-Agent":    "Cline/3.0.47",
-			"HTTP-Referer":  "https://cline.bot",
-			"X-Title":       "Cline",
-			"X-CLIENT-TYPE": "cline-sdk",
+			"Content-Type":     "application/json",
+			"User-Agent":       "Cline/3.0.47",
+			"HTTP-Referer":     "https://cline.bot",
+			"X-Title":          "Cline",
+			"X-CLIENT-TYPE":    "cline-sdk",
 			"X-CLIENT-VERSION": "3.0.47",
-			"X-PLATFORM":    "terminal",
+			"X-PLATFORM":       "terminal",
 		},
 	)
 	if err != nil {
@@ -450,18 +451,18 @@ func doFullCapture() error {
 		"https://api.cline.bot/api/v1/chat/completions",
 		chatBody,
 		map[string]string{
-			"Authorization":  "Bearer workos:" + clineRegResp.Data.AccessToken,
-			"Content-Type":   "application/json",
-			"User-Agent":     "Cline/3.0.47",
-			"HTTP-Referer":   "https://cline.bot",
-			"X-Title":        "Cline",
-			"X-IS-MULTIROOT": "false",
-			"X-CLIENT-TYPE":  "cline-sdk",
-			"X-CLIENT-VERSION": "3.0.47",
-			"X-PLATFORM":     "terminal",
+			"Authorization":      "Bearer workos:" + clineRegResp.Data.AccessToken,
+			"Content-Type":       "application/json",
+			"User-Agent":         "Cline/3.0.47",
+			"HTTP-Referer":       "https://cline.bot",
+			"X-Title":            "Cline",
+			"X-IS-MULTIROOT":     "false",
+			"X-CLIENT-TYPE":      "cline-sdk",
+			"X-CLIENT-VERSION":   "3.0.47",
+			"X-PLATFORM":         "terminal",
 			"X-PLATFORM-VERSION": "3.0.47",
-			"X-CORE-VERSION": "0.0.66",
-			"X-Task-ID":      "sess_" + fmt.Sprintf("%d", time.Now().UnixMilli()),
+			"X-CORE-VERSION":     "0.0.66",
+			"X-Task-ID":          "sess_" + fmt.Sprintf("%d", time.Now().UnixMilli()),
 		},
 	)
 	if err != nil {

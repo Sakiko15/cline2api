@@ -11,9 +11,9 @@ import (
 )
 
 var (
-	pool      *AccountPool
-	poolMu    sync.Mutex
-	poolPath  string
+	pool     *AccountPool
+	poolMu   sync.Mutex
+	poolPath string
 )
 
 func init() {
@@ -172,12 +172,16 @@ func listAccounts() []*Account {
 	for i, a := range p.Accounts {
 		// Don't expose tokens
 		result[i] = &Account{
-			AccountID:  a.AccountID,
-			Email:      a.Email,
-			Status:     a.Status,
-			LastUsed:   a.LastUsed,
-			UsageCount: a.UsageCount,
-			CreatedAt:  a.CreatedAt,
+			AccountID:        a.AccountID,
+			Email:            a.Email,
+			Status:           a.Status,
+			LastUsed:         a.LastUsed,
+			UsageCount:       a.UsageCount,
+			PromptTokens:     a.PromptTokens,
+			CompletionTokens: a.CompletionTokens,
+			TotalTokens:      a.TotalTokens,
+			CachedTokens:     a.CachedTokens,
+			CreatedAt:        a.CreatedAt,
 		}
 	}
 	return result
