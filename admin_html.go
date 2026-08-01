@@ -124,6 +124,9 @@ tbody tr:hover{background:var(--surface2)}
 .status-dot.active{background:var(--green)}
 .status-dot.cooldown{background:var(--yellow)}
 .status-dot.expired{background:var(--red)}
+.status-cooldown{display:inline-flex;flex-direction:column;align-items:center;gap:0;line-height:1.2}
+.status-cooldown .cd-icon{font-size:13px}
+.status-cooldown .cd-time{font-size:10px;font-weight:500;opacity:0.8}
 
 /* ===== Buttons ===== */
 .btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);cursor:pointer;font-size:14px;font-weight:500;transition:all 0.18s var(--ease);text-decoration:none;line-height:1.2;white-space:nowrap}
@@ -286,10 +289,18 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       <span class="nav-label">设置</span>
     </div>
+    <div class="nav-item" data-tab="about">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+      <span class="nav-label">关于</span>
+    </div>
   </div>
   <div class="sidebar-footer">
-    <div>管理面板: <a href="/admin/">/admin/</a></div>
-    <div>API 地址: <span id="footerApiAddr">http://127.0.0.1:3457</span></div>
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+      <span style="font-weight:600;color:var(--text)">Cline2API</span>
+      <span style="font-size:11px;opacity:0.7">v1.0.0</span>
+    </div>
+    <div style="margin-bottom:4px">API: <span id="footerApiAddr">127.0.0.1:3457</span></div>
+    <div><a href="#" onclick="openExternal('https://github.com/luawei1/cline2api');return false">GitHub</a> · <a href="#" onclick="openExternal('https://github.com/luawei1/cline2api/issues');return false">反馈</a> · MIT</div>
   </div>
 </div>
 
@@ -552,6 +563,103 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 </div>
 
 </div>
+
+<div id="tab-about" class="tab-panel" style="display:none">
+  <div class="large-title">关于</div>
+  <div class="large-subtitle">应用信息、使用指南与开源协议</div>
+
+  <div class="section">
+    <div class="section-title">应用信息</div>
+    <div class="section-body">
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
+        <div style="width:56px;height:56px;border-radius:12px;background:linear-gradient(135deg,#4F46E5,#7C3AED);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width:28px;height:28px"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        </div>
+        <div>
+          <div style="font-size:20px;font-weight:700;color:var(--text)">Cline2API</div>
+          <div style="font-size:13px;color:var(--text2);margin-top:2px">Cline API 反向代理 · 多账号轮询 · 双协议兼容</div>
+          <div style="font-size:12px;color:var(--text3);margin-top:4px">版本 v1.0.0 · MIT License · Go 1.25 + Wails v2</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">快速上手</div>
+    <div class="section-body">
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <div style="width:28px;height:28px;border-radius:50%;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0">1</div>
+          <div>
+            <div style="font-weight:600;color:var(--text)">添加 Cline 账号</div>
+            <div style="font-size:13px;color:var(--text2);margin-top:2px">前往「导入账号」页面，通过 OAuth 登录或手动输入 refreshToken 添加账号。支持批量导入。</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <div style="width:28px;height:28px;border-radius:50%;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0">2</div>
+          <div>
+            <div style="font-weight:600;color:var(--text)">生成 API Key</div>
+            <div style="font-size:13px;color:var(--text2);margin-top:2px">前往「设置」页面生成密钥。如不配置任何密钥，代理允许匿名访问。</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <div style="width:28px;height:28px;border-radius:50%;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0">3</div>
+          <div>
+            <div style="font-weight:600;color:var(--text)">配置客户端</div>
+            <div style="font-size:13px;color:var(--text2);margin-top:2px">在 Claude Code、Cline 等客户端中设置：</div>
+            <div style="font-family:ui-monospace,monospace;font-size:12px;background:var(--surface2);padding:8px 12px;border-radius:6px;margin-top:6px;color:var(--text2)">
+              Base URL: http://127.0.0.1:3457/v1<br>
+              API Key: &lt;生成的密钥&gt;<br>
+              Model: cline-free/glm-5.2
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">功能特性</div>
+    <div class="section-body">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;font-size:13px;color:var(--text2)">
+        <div>✅ 多账号轮询（轮询/填满/随机）</div>
+        <div>✅ OpenAI & Anthropic 双协议</div>
+        <div>✅ 429 冷却自动恢复</div>
+        <div>✅ 账号导出/导入（跨设备迁移）</div>
+        <div>✅ OAuth 系统浏览器登录</div>
+        <div>✅ 请求日志与统计</div>
+        <div>✅ System Prompt 覆盖</div>
+        <div>✅ 跨平台桌面端（Win/Mac/Linux）</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">项目链接</div>
+    <div class="section-body">
+      <div style="display:flex;flex-direction:column;gap:10px;font-size:14px">
+        <div><span style="color:var(--text3);display:inline-block;width:80px">仓库地址</span><a href="#" onclick="openExternal('https://github.com/luawei1/cline2api');return false" style="color:var(--accent);cursor:pointer">github.com/luawei1/cline2api</a></div>
+        <div><span style="color:var(--text3);display:inline-block;width:80px">问题反馈</span><a href="#" onclick="openExternal('https://github.com/luawei1/cline2api/issues');return false" style="color:var(--accent);cursor:pointer">github.com/luawei1/cline2api/issues</a></div>
+        <div><span style="color:var(--text3);display:inline-block;width:80px">下载更新</span><a href="#" onclick="openExternal('https://github.com/luawei1/cline2api/releases');return false" style="color:var(--accent);cursor:pointer">github.com/luawei1/cline2api/releases</a></div>
+        <div><span style="color:var(--text3);display:inline-block;width:80px">开源协议</span>MIT License © 2026 luawei1</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">数据与隐私</div>
+    <div class="section-body">
+      <div style="font-size:13px;color:var(--text2);line-height:1.8">
+        <div>• 本程序仅在本地运行，默认监听 <code style="background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:12px">127.0.0.1:3457</code>，不对外暴露。</div>
+        <div>• 账号凭据（refreshToken）存储在可执行文件同目录的 <code style="background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:12px">.cline-accounts.json</code> 中，明文保存，请注意保护。</div>
+        <div>• 所有 API 请求通过本机代理转发至 Cline 官方服务器，不经过任何第三方。</div>
+        <div>• 关闭窗口即停止服务，无后台驻留进程。</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div>
 </div>
 </div>
 
@@ -580,16 +688,14 @@ function toast(msg, t) {
   setTimeout(() => el.classList.remove('show'), 3500);
 }
 
-// 格式化冷却倒计时：传入 ISO 时间，返回 "58分钟后" 或 "已到期"
+// 格式化冷却倒计时：返回紧凑的 "3.2h" 格式
 function formatCooldown(isoTime) {
   const until = new Date(isoTime);
   const diff = until - new Date();
   if (diff <= 0) return '即将恢复';
-  const mins = Math.floor(diff / 60000);
-  if (mins < 60) return mins + '分钟后';
-  const hours = Math.floor(mins / 60);
-  const remMin = mins % 60;
-  return hours + '小时' + (remMin > 0 ? remMin + '分' : '') + '后';
+  const hours = diff / 3600000;
+  if (hours < 1) return Math.ceil(diff / 60000) + 'm';
+  return hours.toFixed(1) + 'h';
 }
 
 // ========== 导航 ==========
@@ -673,8 +779,8 @@ async function loadAccounts() {
     const tbody = _('accountTableBody');
     const cards = _('accountCards');
     if (!list || list.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty">暂无账号，前往 <a href="#" onclick="switchTab(\'import\')" style="color:var(--accent);cursor:pointer">导入账号</a> 页添加</td></tr>';
-      cards.innerHTML = '<div class="empty">暂无账号，前往 <a href="#" onclick="switchTab(\'import\')">导入账号</a> 页添加</div>';
+      tbody.innerHTML = '<tr><td colspan="10" class="empty">👋 还没有账号 — 前往 <a href="#" onclick="switchTab(\'import\')" style="color:var(--accent);cursor:pointer">导入账号</a> 添加你的第一个 Cline 账号</td></tr>';
+      cards.innerHTML = '<div class="empty">👋 还没有账号 — 前往 <a href="#" onclick="switchTab(\'import\')" style="color:var(--accent)">导入账号</a> 添加你的第一个 Cline 账号</div>';
       return;
     }
     const sn = { active: '活跃', cooldown: '冷却', expired: '已过期' };
@@ -682,7 +788,7 @@ async function loadAccounts() {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString('zh-CN') : '-';
       const cr = a.createdAt ? new Date(a.createdAt).toLocaleString('zh-CN') : '-';
       const statusBadge = a.status === 'cooldown' && a.cooldownUntil
-        ? '<span class="status cooldown"><span class="status-dot cooldown"></span>冷却 · ' + formatCooldown(a.cooldownUntil) + '</span>'
+        ? '<span class="status cooldown status-cooldown" title="冷却 · 剩余 ' + formatCooldown(a.cooldownUntil) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(a.cooldownUntil) + '</span></span>'
         : '<span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span>';
       return '<tr>' +
         '<td>' + esc(a.email) + '</td>' +
@@ -703,7 +809,7 @@ async function loadAccounts() {
     cards.innerHTML = list.map(a => {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString('zh-CN') : '从未使用';
       const cardStatus = a.status === 'cooldown' && a.cooldownUntil
-        ? '<span class="status cooldown"><span class="status-dot cooldown"></span>冷却 · ' + formatCooldown(a.cooldownUntil) + '</span>'
+        ? '<span class="status cooldown status-cooldown" title="冷却 · 剩余 ' + formatCooldown(a.cooldownUntil) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(a.cooldownUntil) + '</span></span>'
         : '<span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span>';
       return '<article class="account-card">' +
         '<div class="account-card-header"><span class="account-email">' + esc(a.email) + '</span>' +
