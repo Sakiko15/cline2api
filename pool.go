@@ -207,6 +207,7 @@ func listAccounts() []*Account {
 			AccountID:        a.AccountID,
 			Email:            a.Email,
 			Status:           a.Status,
+			CooldownUntil:    a.CooldownUntil,
 			LastUsed:         a.LastUsed,
 			UsageCount:       a.UsageCount,
 			PromptTokens:     a.PromptTokens,

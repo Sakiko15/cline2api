@@ -580,6 +580,18 @@ function toast(msg, t) {
   setTimeout(() => el.classList.remove('show'), 3500);
 }
 
+// 格式化冷却倒计时：传入 ISO 时间，返回 "58分钟后" 或 "已到期"
+function formatCooldown(isoTime) {
+  const until = new Date(isoTime);
+  const diff = until - new Date();
+  if (diff <= 0) return '即将恢复';
+  const mins = Math.floor(diff / 60000);
+  if (mins < 60) return mins + '分钟后';
+  const hours = Math.floor(mins / 60);
+  const remMin = mins % 60;
+  return hours + '小时' + (remMin > 0 ? remMin + '分' : '') + '后';
+}
+
 // ========== 导航 ==========
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => {
@@ -669,9 +681,12 @@ async function loadAccounts() {
     tbody.innerHTML = list.map(a => {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString('zh-CN') : '-';
       const cr = a.createdAt ? new Date(a.createdAt).toLocaleString('zh-CN') : '-';
+      const statusBadge = a.status === 'cooldown' && a.cooldownUntil
+        ? '<span class="status cooldown"><span class="status-dot cooldown"></span>冷却 · ' + formatCooldown(a.cooldownUntil) + '</span>'
+        : '<span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span>';
       return '<tr>' +
         '<td>' + esc(a.email) + '</td>' +
-        '<td><span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span></td>' +
+        '<td>' + statusBadge + '</td>' +
         '<td>' + formatNumber(a.usageCount) + '</td>' +
         '<td>' + formatTokenCount(a.promptTokens) + '</td>' +
         '<td>' + formatTokenCount(a.completionTokens) + '</td>' +
@@ -687,9 +702,12 @@ async function loadAccounts() {
     }).join('');
     cards.innerHTML = list.map(a => {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString('zh-CN') : '从未使用';
+      const cardStatus = a.status === 'cooldown' && a.cooldownUntil
+        ? '<span class="status cooldown"><span class="status-dot cooldown"></span>冷却 · ' + formatCooldown(a.cooldownUntil) + '</span>'
+        : '<span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span>';
       return '<article class="account-card">' +
         '<div class="account-card-header"><span class="account-email">' + esc(a.email) + '</span>' +
-        '<span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span></div>' +
+        cardStatus + '</div>' +
         '<div class="account-metrics">' +
           '<div class="account-metric"><span class="account-metric-label">请求</span><span class="account-metric-value">' + formatNumber(a.usageCount) + '</span></div>' +
           '<div class="account-metric"><span class="account-metric-label">总 Token</span><span class="account-metric-value">' + formatTokenCount(a.totalTokens) + '</span></div>' +

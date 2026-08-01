@@ -9,6 +9,7 @@ type Account struct {
 	AccessToken      string    `json:"-"`
 	ExpiresAt        int64     `json:"-"`
 	Status           string    `json:"status"` // active, cooldown, expired
+	CooldownUntil    time.Time `json:"cooldownUntil,omitempty"`
 	LastUsed         time.Time `json:"lastUsed"`
 	UsageCount       int64     `json:"usageCount"`
 	PromptTokens     int64     `json:"promptTokens"`

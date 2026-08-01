@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -234,6 +236,9 @@ func startProxy(port int) error {
 		Handler: mux,
 	}
 
+	// 启动后台冷却恢复巡检
+	startCooldownRecovery()
+
 	fmt.Println("")
 	fmt.Println(strings.Repeat("=", 58))
 	fmt.Println("  Cline Go Proxy v1.0 - No CLI Required")
@@ -386,6 +391,7 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		acc.Status = "cooldown"
+		acc.CooldownUntil = time.Now().Add(5 * time.Minute)
 		savePool()
 		return nil, acc, fmt.Errorf("upstream request: %w", err)
 	}
@@ -416,12 +422,14 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 	if resp.StatusCode != 200 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		bodyStr := string(bodyBytes)
 		// Mark account on cooldown on rate limits
 		if resp.StatusCode == 429 {
 			acc.Status = "cooldown"
+			acc.CooldownUntil = parseCooldownUntil(bodyStr)
 			savePool()
 		}
-		return nil, acc, fmt.Errorf("API %d: %s", resp.StatusCode, truncate(string(bodyBytes), 500))
+		return nil, acc, fmt.Errorf("API %d: %s", resp.StatusCode, truncate(bodyStr, 500))
 	}
 
 	acc.LastUsed = time.Now()
@@ -438,6 +446,61 @@ type accountTestResult struct {
 	InputTokens  int64  `json:"inputTokens"`
 	OutputTokens int64  `json:"outputTokens"`
 	Error        string `json:"error,omitempty"`
+}
+
+// parseCooldownUntil 从 429 响应体中解析 "Try again in 1h 1m" 格式的等待时长，
+// 返回预计恢复时间；解析失败则回退到 1 小时后。
+var cooldownRe = regexp.MustCompile(`(?i)try\s+again\s+in\s+(\d+)\s*h?(?:\s*(\d+))?\s*m?`)
+
+func parseCooldownUntil(body string) time.Time {
+	matches := cooldownRe.FindStringSubmatch(body)
+	if len(matches) >= 2 {
+		hours, _ := strconv.Atoi(matches[1])
+		minutes := 0
+		if len(matches) >= 3 && matches[2] != "" {
+			minutes, _ = strconv.Atoi(matches[2])
+		}
+		if hours > 0 || minutes > 0 {
+			return time.Now().Add(time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute)
+		}
+	}
+	// 解析失败，回退 1 小时
+	return time.Now().Add(1 * time.Hour)
+}
+
+// startCooldownRecovery 启动后台 goroutine，每 30 秒检查一次 cooldown 账号，
+// 对 CooldownUntil 已过期的账号执行探活，成功则自动激活。
+func startCooldownRecovery() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			p := loadPool()
+			poolMu.Lock()
+			var toRecover []*Account
+			for _, acc := range p.Accounts {
+				if acc.Status != "cooldown" {
+					continue
+				}
+				// 有恢复时间且已过期 → 探活
+				// 无恢复时间（旧数据）→ 也尝试探活
+				if acc.CooldownUntil.IsZero() || time.Now().After(acc.CooldownUntil) {
+					toRecover = append(toRecover, acc)
+				}
+			}
+			poolMu.Unlock()
+
+			for _, acc := range toRecover {
+				log.Printf("cooldown recovery: testing %s", acc.Email)
+				result := testAccount(acc)
+				if result.OK {
+					log.Printf("cooldown recovery: %s reactivated", acc.Email)
+				} else {
+					log.Printf("cooldown recovery: %s still unavailable: %s", acc.Email, result.Error)
+				}
+			}
+		}
+	}()
 }
 
 // testAccount sends a minimal "hi" request through a specific account to verify
