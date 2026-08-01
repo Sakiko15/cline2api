@@ -979,12 +979,31 @@ async function exportAccounts() {
 }
 
 // ========== 批量导入 ==========
+// 解析导入数据：支持导出格式 {tokens:[...]}、JSON 数组 [...]、单行一个 token 的纯文本
+function parseImportData(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // 纯文本：每行一个 refreshToken
+    return text.split('\n').filter(t => t.trim()).map(t => ({ refreshToken: t.trim() }));
+  }
+  // 导出格式 {tokens:[...], exportedAt:...}
+  if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.tokens)) {
+    return parsed.tokens;
+  }
+  // JSON 数组
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
+  // 单个对象
+  return [parsed];
+}
+
 async function batchImport() {
   const raw = _('batchInput').value.trim();
   if (!raw) { toast('请输入账号数据', 'error'); return; }
-  let tokens;
-  try { tokens = JSON.parse(raw); if (!Array.isArray(tokens)) tokens = [tokens]; }
-  catch { tokens = raw.split('\n').filter(t => t.trim()).map(t => ({ refreshToken: t.trim() })); }
+  const tokens = parseImportData(raw);
   try {
     const d = await api('POST', '/batch-import', { tokens });
     toast(d.message || '导入完成', 'success');
@@ -997,9 +1016,7 @@ async function handleFileImport(event) {
   const file = event.target.files[0];
   if (!file) return;
   const text = await file.text();
-  let tokens;
-  try { tokens = JSON.parse(text); if (!Array.isArray(tokens)) tokens = [tokens]; }
-  catch { tokens = text.split('\n').filter(t => t.trim()).map(t => ({ refreshToken: t.trim() })); }
+  const tokens = parseImportData(text);
   try {
     const d = await api('POST', '/batch-import', { tokens });
     toast(d.message || '导入了 ' + tokens.length + ' 个账号', 'success');
