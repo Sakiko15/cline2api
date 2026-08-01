@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -46,8 +45,7 @@ var (
 )
 
 func init() {
-	exe, _ := os.Executable()
-	requestLogsPath = filepath.Join(filepath.Dir(exe), ".cline-request-logs.json")
+	requestLogsPath = resolveDataPath(".cline-request-logs.json")
 }
 
 func loadRequestLogs() {

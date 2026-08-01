@@ -361,6 +361,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     </div>
     <div style="display:flex;gap:8px">
       <button class="btn btn-sm" onclick="testAllAccounts(this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>测试全部</button>
+      <button class="btn btn-sm" onclick="exportAccounts()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>导出</button>
       <button class="btn btn-primary btn-sm" onclick="switchTab('import')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加</button>
       <button class="btn btn-sm" onclick="loadAccounts()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>刷新</button>
     </div>
@@ -399,7 +400,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
           <div>
             <div style="font-weight:600" id="oauthStatus">等待浏览器授权...</div>
             <div style="color:var(--text2);font-size:13px;margin-top:4px">
-              打开 <a href="#" id="oauthUrl" target="_blank" style="color:var(--accent)"></a>
+              点击链接（系统浏览器打开）: <a href="#" id="oauthUrl" style="color:var(--accent);cursor:pointer"></a><br>
               并输入代码: <strong id="oauthUserCode"></strong>
             </div>
           </div>
@@ -626,6 +627,14 @@ async function api(method, path, body) {
   return data;
 }
 
+// 用系统默认浏览器打开外部链接（桌面 WebView 内导航不会跳外部浏览器，需走后端）
+async function openExternal(url) {
+  try {
+    await api('GET', '/open-external?url=' + encodeURIComponent(url));
+    toast('已在系统浏览器中打开', 'success');
+  } catch (e) { toast('打开失败: ' + e.message, 'error'); }
+}
+
 // ========== 仪表盘 ==========
 async function loadStats() {
   try {
@@ -783,7 +792,8 @@ async function startOAuth() {
     _('oauthStatus').textContent = '请在浏览器中打开链接并输入代码';
     const u = _('oauthUrl');
     u.textContent = s.verificationUri;
-    u.href = s.verificationUri;
+    u.href = '#';
+    u.onclick = async function(e) { e.preventDefault(); await openExternal(s.verificationUri); };
     _('oauthUserCode').textContent = s.userCode;
     const poll = setInterval(async () => {
       try {
@@ -825,6 +835,23 @@ async function addByToken() {
     _('tokenEmail').value = '';
     loadAccounts(); loadStats();
   } catch (e) { toast('添加失败: ' + e.message, 'error'); }
+}
+
+// ========== 导出账号 ==========
+async function exportAccounts() {
+  try {
+    const res = await fetch(API + '/accounts/export');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'cline-accounts-export.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast('账号已导出', 'success');
+  } catch (e) { toast('导出失败: ' + e.message, 'error'); }
 }
 
 // ========== 批量导入 ==========

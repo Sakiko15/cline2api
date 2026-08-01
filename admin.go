@@ -46,6 +46,7 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/accounts", corsHandler(handleAdminAccounts))
 	mux.HandleFunc("/admin/api/accounts/add", corsHandler(handleAdminAccountAdd))
 	mux.HandleFunc("/admin/api/accounts/delete", corsHandler(handleAdminAccountDelete))
+	mux.HandleFunc("/admin/api/accounts/export", corsHandler(handleExportAccounts))
 	mux.HandleFunc("/admin/api/oauth/start", corsHandler(handleOAuthStart))
 	mux.HandleFunc("/admin/api/oauth/status", corsHandler(handleOAuthStatus))
 	mux.HandleFunc("/admin/api/sso/import", corsHandler(handleSSOImport))
@@ -62,6 +63,7 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/config", corsHandler(handleAdminConfig))
 	mux.HandleFunc("/admin/api/config/update", corsHandler(handleAdminUpdateConfig))
 	mux.HandleFunc("/admin/api/request-logs", corsHandler(handleAdminRequestLogs))
+	mux.HandleFunc("/admin/api/open-external", corsHandler(handleOpenExternal))
 }
 
 func adminStaticHandler(w http.ResponseWriter, r *http.Request) {
@@ -466,6 +468,55 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 			"errors":   errors,
 		},
 	})
+}
+
+// GET /admin/api/accounts/export — 导出账号为批量导入兼容格式
+func handleExportAccounts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
+
+	p := loadPool()
+	type exportToken struct {
+		RefreshToken string `json:"refreshToken"`
+		Email        string `json:"email"`
+	}
+	tokens := make([]exportToken, 0, len(p.Accounts))
+	for _, acc := range p.Accounts {
+		if acc.RefreshToken != "" {
+			tokens = append(tokens, exportToken{
+				RefreshToken: acc.RefreshToken,
+				Email:        acc.Email,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="cline-accounts-export.json"`)
+	json.NewEncoder(w).Encode(map[string]any{
+		"tokens":     tokens,
+		"exportedAt": time.Now().Format(time.RFC3339),
+	})
+}
+
+// GET /admin/api/open-external?url=... — 用系统默认浏览器打开外部链接
+func handleOpenExternal(w http.ResponseWriter, r *http.Request) {
+	url := r.URL.Query().Get("url")
+	if url == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "url required"})
+		return
+	}
+	// 仅允许 http/https，防止任意命令执行
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "only http/https URLs allowed"})
+		return
+	}
+	if err := openBrowser(url); err != nil {
+		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: err.Error()})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true})
 }
 
 // POST /admin/api/accounts/refresh-all

@@ -5,7 +5,12 @@ cline-proxy.exe
 cline-proxy.exe~
 .zcode/
 
+# generated Windows icon resource (auto-linked by go build)
+*.syso
+
 # desktop build artifacts
 desktop/build/
+desktop/*.exe
 cline-desktop
 cline-desktop.exe
+cline-proxy-desktop-debug.exe
