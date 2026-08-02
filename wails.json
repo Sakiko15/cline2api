@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schema.json",
+  "name": "cline2api",
+  "outputfilename": "cline-proxy-desktop",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "luawei1",
+    "email": ""
+  }
+}

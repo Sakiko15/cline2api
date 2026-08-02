@@ -16,15 +16,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: windows-amd64
+          - target: windows/amd64
             runner: windows-latest
-            artifact: cline-proxy-desktop.exe
-          - target: darwin-universal
+          - target: darwin/universal
             runner: macos-latest
-            artifact: cline-proxy-desktop-darwin-universal
-          - target: linux-amd64
+          - target: linux/amd64
             runner: ubuntu-22.04
-            artifact: cline-proxy-desktop-linux-amd64
 
     steps:
       - uses: actions/checkout@v4
@@ -34,56 +31,32 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      # ── Linux: 安装 WebKit2GTK 4.0 开发包（Wails v2.10.x 依赖 4.0 而非 4.1）──
+      # ── 安装 Wails CLI ──
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.10.2
+
+      # ── Linux: WebKit2GTK 4.0 开发包 ──
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
 
-      # ── Windows: 直接编译，.syso 图标资源已在仓库中自动链接 ──
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          go build -tags "desktop production" -trimpath -ldflags="-s -w -H windowsgui" -o ${{ matrix.artifact }} .
+      # ── 构建：wails build 自动处理 CGO/Objective-C/Universal Binary ──
+      - name: Wails build
+        run: wails build -platform ${{ matrix.target }} -clean -trimpath -ldflags "-s -w"
 
+      # ── Windows: 验证自检 ──
       - name: Verify selfcheck (Windows)
         if: runner.os == 'Windows'
+        working-directory: build/bin
         run: ./cline-proxy-desktop.exe -selfcheck
-
-      # ── macOS Universal Binary: 在 arm64 runner 上分别编译 arm64 和 amd64，用 lipo 合并 ──
-      - name: Build arm64 (macOS)
-        if: runner.os == 'macOS'
-        env:
-          CGO_LDFLAGS: -framework UniformTypeIdentifiers
-        run: |
-          go build -tags "desktop production" -trimpath -ldflags="-s -w" -o build-arm64 .
-
-      - name: Build amd64 (macOS cross-compile)
-        if: runner.os == 'macOS'
-        env:
-          GOARCH: amd64
-          CGO_LDFLAGS: -framework UniformTypeIdentifiers
-        run: |
-          go build -tags "desktop production" -trimpath -ldflags="-s -w" -o build-amd64 .
-
-      - name: Create Universal Binary
-        if: runner.os == 'macOS'
-        run: |
-          lipo -create -output ${{ matrix.artifact }} build-arm64 build-amd64
-          lipo -info ${{ matrix.artifact }}
-
-      # ── Linux: 直接编译 ──
-      - name: Build (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          go build -tags "desktop production" -trimpath -ldflags="-s -w" -o ${{ matrix.artifact }} .
 
       # ── 上传产物 ──
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: cline-proxy-desktop-${{ matrix.target }}
+          path: build/bin/*
 
   release:
     name: Release
@@ -100,6 +73,6 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            */cline-proxy-desktop.exe
-            */cline-proxy-desktop-darwin-universal
-            */cline-proxy-desktop-linux-amd64
+            cline-proxy-desktop-windows-amd64/cline-proxy-desktop.exe
+            cline-proxy-desktop-darwin-universal/cline-proxy-desktop
+            cline-proxy-desktop-linux-amd64/cline-proxy-desktop
