@@ -18,10 +18,13 @@ jobs:
         include:
           - target: windows/amd64
             runner: windows-latest
+            artifact: cline-proxy-desktop.exe
           - target: darwin/universal
             runner: macos-latest
+            artifact: cline-proxy-desktop
           - target: linux/amd64
             runner: ubuntu-22.04
+            artifact: cline-proxy-desktop
 
     steps:
       - uses: actions/checkout@v4
@@ -31,32 +34,45 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      # ── 安装 Wails CLI ──
+      # ── 安装 Wails CLI（带 Go module cache 缓存） ──
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.10.2
 
-      # ── Linux: WebKit2GTK 4.0 开发包 ──
+      # ── Linux: WebKit2GTK 4.0 开发包（Wails v2.10.x 依赖 4.0） ──
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
 
-      # ── 构建：wails build 自动处理 CGO/Objective-C/Universal Binary ──
+      # ── 构建 ──
+      # -s        跳过前端（本项目无前端构建）
+      # -m        跳过 go mod tidy（CI 中模块已整洁）
+      # -skipbindings 跳过绑定生成（本项目用 desktop build tag，绑定生成器不兼容）
+      # -nopackage 跳过平台打包（只需原始二进制）
+      # -trimpath  去除文件路径
+      # -tags      传入 desktop production（wails build 不会自动加）
       - name: Wails build
-        run: wails build -platform ${{ matrix.target }} -clean -trimpath -ldflags "-s -w"
+        run: |
+          wails build \
+            -platform ${{ matrix.target }} \
+            -s -m -skipbindings -nopackage \
+            -trimpath \
+            -ldflags "-s -w${{ matrix.target == 'windows/amd64' && ' -H windowsgui' || '' }}" \
+            -tags "desktop production"
 
-      # ── Windows: 验证自检 ──
+      # ── Windows: 自检验证 ──
       - name: Verify selfcheck (Windows)
         if: runner.os == 'Windows'
         working-directory: build/bin
         run: ./cline-proxy-desktop.exe -selfcheck
 
-      # ── 上传产物 ──
+      # ── 上传产物（仅可执行文件） ──
       - uses: actions/upload-artifact@v4
         with:
           name: cline-proxy-desktop-${{ matrix.target }}
-          path: build/bin/*
+          path: build/bin/${{ matrix.artifact }}
+          if-no-files-found: error
 
   release:
     name: Release
