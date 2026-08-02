@@ -21,10 +21,6 @@ jobs:
             arch: arm64
             runner: macos-latest
             artifact: cline-proxy-desktop-darwin-arm64
-          - os: darwin
-            arch: amd64
-            runner: macos-latest
-            artifact: cline-proxy-desktop-darwin-amd64
           - os: linux
             arch: amd64
             runner: ubuntu-22.04
@@ -45,7 +41,6 @@ jobs:
 
       - name: Build desktop app
         env:
-          GOARCH: ${{ matrix.arch }}
           CGO_LDFLAGS: ${{ runner.os == 'macOS' && '-framework UniformTypeIdentifiers' || '' }}
         run: go build -tags "desktop production" -trimpath -ldflags="-s -w${{ matrix.os == 'windows' && ' -H windowsgui' || '' }}" -o ${{ matrix.artifact }} .
 
@@ -75,5 +70,4 @@ jobs:
           files: |
             */cline-proxy-desktop.exe
             */cline-proxy-desktop-darwin-arm64
-            */cline-proxy-desktop-darwin-amd64
             */cline-proxy-desktop-linux-amd64
