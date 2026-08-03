@@ -23,6 +23,7 @@ Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI �
 - **双协议兼容**：同时支持 `/v1/chat/completions`（OpenAI）和 `/v1/messages`（Anthropic Messages API）
 - **多账号轮询**：自动在多个 Cline 账号间切换负载（`round_robin` / `fill` / `random` 策略）
 - **中文管理后台**：浏览器访问 `/admin/` 管理账号、API Key、模型配置、请求头、代理设置
+- **自定义模型**：内置模型之外，可在后台手动添加/删除模型 ID，并自由选择默认模型
 - **API Key 鉴权**：保护代理端点，支持生成/删除多个 API Key
 - **System Prompt 覆盖**：项目目录下放 `override.md` 则自动替换系统提示词
 - **账号导入/导出**：支持 OAuth 登录、手动 Token、批量文件导入，以及跨设备导出
@@ -34,6 +35,9 @@ Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI �
 ### 方式一：桌面端（推荐，分享给他人）
 
 从 [Releases](https://github.com/luawei1/cline2api/releases) 下载对应平台的可执行文件，双击运行即可。
+
+> Windows 提示 SmartScreen「已保护你的电脑」是**未购买代码签名证书的正常现象**，
+> 点击「更多信息 → 仍要运行」即可，不影响使用。
 
 | 平台 | 文件 | 说明 |
 |------|------|------|
@@ -118,6 +122,15 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
+### 发布 zip（网盘分发推荐）
+
+裸 exe 上传网盘后浏览器容易拦截，打包成 zip 可显著降低拦截率：
+
+```bash
+./desktop/build.sh && ./desktop/dist.sh
+# 产物：desktop/dist/ccline2api-windows-amd64.zip
+```
+
 ## 数据文件
 
 程序按以下顺序查找数据文件（找到即使用）：
@@ -128,7 +141,7 @@ git push origin v1.0.0
 
 | 文件 | 说明 |
 |------|------|
-| `.cline-accounts.json` | 账号池和 API Key |
+| `.cline-accounts.json` | 账号池、API Key、自定义模型与默认模型 |
 | `.cline-request-logs.json` | 请求日志 |
 | `override.md` | System Prompt 覆盖（可选）|
 
@@ -136,14 +149,19 @@ git push origin v1.0.0
 
 ## 可用模型
 
-| 模型 ID | 说明 |
+内置 6 个模型，也可在后台手动添加自定义模型 ID：
+
+| 模型 ID | 计费 |
 |---------|------|
 | `cline-free/glm-5.2` | ✅ 免费，不消耗额度 |
 | `cline-pass/glm-5.2` | ❌ 需要 cline-pass 订阅 |
 | `cline-pass/deepseek-v4-flash` | ❌ 需要 cline-pass 订阅 |
 | `cline-pass/qwen3.7-max` | ❌ 需要 cline-pass 订阅 |
+| `deepseek/deepseek-v4-flash` | ✅ 免费（官方 v4-flash 0731 通道）|
+| `poolside/laguna-s-2.1:free` | ✅ 免费（`:free` 后缀）|
 
-可在后台 **设置 → 默认模型** 中修改。
+后台「可用模型」区可添加/删除自定义模型（带 ✕ 删除按钮的是自定义项），
+并在「代理配置 → 默认模型」下拉中设置默认模型。
 
 ## 项目结构
 
