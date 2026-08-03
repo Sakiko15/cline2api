@@ -63,13 +63,13 @@ func loadPool() *AccountPool {
 
 	data, err := os.ReadFile(poolPath)
 	if err != nil {
-		pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}}
+		pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{}}
 		return pool
 	}
 
 	var p AccountPool
 	if err := json.Unmarshal(data, &p); err != nil {
-		pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}}
+		pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{}}
 		return pool
 	}
 
@@ -78,6 +78,9 @@ func loadPool() *AccountPool {
 	}
 	if p.Keys == nil {
 		p.Keys = []string{}
+	}
+	if p.Models == nil {
+		p.Models = []Model{}
 	}
 	pool = &p
 	return pool

@@ -17,10 +17,44 @@ import (
 )
 
 const (
-	defaultModel           = "cline-free/glm-5.2"
 	defaultMaxTokens       = 128000
 	defaultReasoningEffort = "high"
+	fallbackDefaultModel   = "cline-free/glm-5.2"
 )
+
+// builtinModels 是内置默认模型列表（不可删除）。用户自定义模型从 AccountPool 加载。
+var builtinModels = []Model{
+	{ID: "cline-free/glm-5.2", Provider: "zai", Cost: "free", Status: "active", Custom: false},
+	{ID: "cline-pass/glm-5.2", Provider: "zai", Cost: "pass", Status: "active", Custom: false},
+	{ID: "cline-pass/deepseek-v4-flash", Provider: "deepseek", Cost: "pass", Status: "active", Custom: false},
+	{ID: "cline-pass/qwen3.7-max", Provider: "qwen", Cost: "pass", Status: "active", Custom: false},
+	{ID: "deepseek/deepseek-v4-flash", Provider: "deepseek", Cost: "pass", Status: "active", Custom: false},
+	{ID: "poolside/laguna-s-2.1:free", Provider: "poolside", Cost: "free", Status: "active", Custom: false},
+}
+
+// getAllModels 返回内置模型 + 用户自定义模型的合并列表。
+func getAllModels() []Model {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+
+	result := make([]Model, 0, len(builtinModels)+len(p.Models))
+	result = append(result, builtinModels...)
+	result = append(result, p.Models...)
+	return result
+}
+
+// getDefaultModel 返回用户设置的默认模型，若未设置则回退到 fallbackDefaultModel。
+func getDefaultModel() string {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+
+	if p.DefaultModel != "" {
+		return p.DefaultModel
+	}
+	return fallbackDefaultModel
+}
 
 var passThroughKeys = []string{
 	"tools", "tool_choice", "parallel_tool_calls", "functions", "function_call",
@@ -120,15 +154,18 @@ func startProxy(port int) error {
 		})
 	}
 
-	modelsList := []map[string]any{
-		{"id": "cline-free/glm-5.2", "object": "model", "created": time.Now().UnixMilli(), "owned_by": "cline"},
-		{"id": "cline-pass/glm-5.2", "object": "model", "created": time.Now().UnixMilli(), "owned_by": "cline"},
-		{"id": "cline-pass/deepseek-v4-flash", "object": "model", "created": time.Now().UnixMilli(), "owned_by": "cline"},
-		{"id": "cline-pass/qwen3.7-max", "object": "model", "created": time.Now().UnixMilli(), "owned_by": "cline"},
-	}
-
 	modelsHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": modelsList})
+		all := getAllModels()
+		list := make([]map[string]any, len(all))
+		for i, m := range all {
+			list[i] = map[string]any{
+				"id":      m.ID,
+				"object":  "model",
+				"created": time.Now().UnixMilli(),
+				"owned_by": "cline",
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": list})
 	})
 	mux.HandleFunc("/v1/models", modelsHandler)
 	mux.HandleFunc("/models", modelsHandler)
@@ -246,7 +283,7 @@ func startProxy(port int) error {
 	fmt.Printf("  http://%s\n", addr)
 	fmt.Printf("  http://%s/v1\n", addr)
 	fmt.Println("  API Key: any value")
-	fmt.Printf("  Model:   %s\n", defaultModel)
+	fmt.Printf("  Model:   %s\n", getDefaultModel())
 	fmt.Printf("  Accounts: %d total, %d active\n", len(loadPool().Accounts), activeCount)
 	fmt.Println(strings.Repeat("=", 58))
 
@@ -297,7 +334,7 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 		maxTokens = int(mt)
 	}
 
-	model := defaultModel
+	model := getDefaultModel()
 	if m, ok := params["model"].(string); ok && m != "" {
 		model = m
 	}
@@ -511,7 +548,7 @@ func testAccount(acc *Account) accountTestResult {
 	started := time.Now()
 
 	params := map[string]any{
-		"model":      defaultModel,
+		"model":      getDefaultModel(),
 		"max_tokens": 16,
 		"stream":     false,
 		"messages": []any{

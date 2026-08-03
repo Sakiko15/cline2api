@@ -189,6 +189,8 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 .model-tag{display:inline-block;padding:4px 10px;border-radius:8px;font-size:12px;font-weight:500;background:var(--surface2);color:var(--text2);margin:3px;border:1px solid var(--border2)}
 .model-tag.free{border-color:var(--green);color:var(--green);background:var(--green-soft)}
 .model-tag.pass{border-color:var(--yellow);color:var(--yellow);background:var(--yellow-soft)}
+.model-item{display:inline-flex;align-items:center;gap:2px;margin:3px}
+.model-item .model-tag{margin:0}
 
 /* action row */
 .action-row{display:flex;gap:8px;flex-wrap:wrap}
@@ -506,6 +508,20 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="15" x2="15" y2="15"/></svg>可用模型</div>
     <div class="section-body">
       <div id="modelsList" class="action-row">加载中...</div>
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div class="field" style="flex:1;min-width:220px">
+          <label>添加模型</label>
+          <input type="text" id="newModelId" placeholder="如 deepseek/deepseek-v4-flash" style="font-family:ui-monospace,monospace">
+        </div>
+        <div class="field">
+          <label>计费</label>
+          <select id="newModelCost">
+            <option value="pass">付费 (pass)</option>
+            <option value="free">免费 (free)</option>
+          </select>
+        </div>
+        <button class="btn btn-success" onclick="addModel()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>添加</button>
+      </div>
     </div>
   </div>
 
@@ -514,7 +530,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     <div class="section-body">
       <div class="form-row">
         <div class="field"><label>监听地址</label><input type="text" id="settingAddr" disabled></div>
-        <div class="field"><label>默认模型</label><input type="text" id="settingDefModel" disabled></div>
+        <div class="field"><label>默认模型</label><select id="settingDefModel" onchange="updateConfig()"><option value="">加载中...</option></select></div>
       </div>
       <div class="form-row">
         <div class="field">
@@ -1090,9 +1106,10 @@ function copyText(t) {
 // ========== 配置管理 ==========
 async function updateConfig() {
   const strategy = _('settingStrategy').value;
+  const defaultModel = _('settingDefModel').value;
   try {
-    await api('POST', '/config/update', { strategy });
-    toast('策略已更新为: ' + strategy, 'success');
+    await api('POST', '/config/update', { strategy, defaultModel });
+    toast('配置已更新', 'success');
   } catch (e) { toast('更新失败: ' + e.message, 'error'); }
 }
 
@@ -1133,14 +1150,43 @@ async function saveHeaders() {
 }
 
 // ========== 模型列表 ==========
+let _cachedModels = [];
 async function loadModels() {
   try {
     const d = await api('GET', '/models');
     const models = d.data.models || [];
-    _('modelsList').innerHTML = models.map(m =>
-      '<span class="model-tag ' + (m.cost || 'free') + '">' + esc(m.id) + '</span>'
-    ).join('') || '<div class="empty">暂无模型</div>';
+    _cachedModels = models;
+    _('modelsList').innerHTML = models.map(m => {
+      let item = '<span class="model-tag ' + (m.cost || 'free') + '">' + esc(m.id) + '</span>';
+      if (m.custom) {
+        item += '<button class="btn btn-sm btn-danger" style="padding:2px 6px" onclick="deleteModel(\'' + esc(m.id) + '\')" title="删除">✕</button>';
+      }
+      return '<span class="model-item">' + item + '</span>';
+    }).join('') || '<div class="empty">暂无模型</div>';
   } catch (e) { _('modelsList').textContent = '加载失败'; }
+}
+
+async function addModel() {
+  const id = _('newModelId').value.trim();
+  const cost = _('newModelCost').value;
+  if (!id) { toast('请输入模型 ID', 'error'); return; }
+  try {
+    await api('POST', '/models/add', { id, cost });
+    toast('模型已添加: ' + id, 'success');
+    _('newModelId').value = '';
+    await loadModels();
+    await loadConfig();
+  } catch (e) { toast('添加失败: ' + e.message, 'error'); }
+}
+
+async function deleteModel(id) {
+  if (!confirm('确认删除模型 ' + id + ' ?')) return;
+  try {
+    await api('POST', '/models/delete', { id });
+    toast('模型已删除: ' + id, 'success');
+    await loadModels();
+    await loadConfig();
+  } catch (e) { toast('删除失败: ' + e.message, 'error'); }
 }
 
 // ========== 配置加载 ==========
@@ -1152,7 +1198,14 @@ async function loadConfig() {
     if (c.strategy) _('settingStrategy').value = c.strategy;
     if (c.version) _('settingVersion').value = c.version;
     if (c.poolPath) _('settingPoolPath').value = c.poolPath;
-    if (c.defaultModel) _('settingDefModel').value = c.defaultModel;
+    if (c.defaultModel !== undefined) {
+      const sel = _('settingDefModel');
+      // 先用缓存模型填充下拉，再选中当前默认值
+      const opts = (_cachedModels || []).map(m =>
+        '<option value="' + esc(m.id) + '"' + (m.id === c.defaultModel ? ' selected' : '') + '>' + esc(m.id) + '</option>'
+      ).join('');
+      sel.innerHTML = opts || '<option value="">（无可用模型）</option>';
+    }
     if (c.headers) {
       const tbody = _('headersTableBody');
       tbody.innerHTML = Object.entries(c.headers).map(([k, v]) =>
@@ -1249,8 +1302,7 @@ async function loadRequestLogs(reset) {
 loadStats();
 loadAccounts();
 loadKeys();
-loadModels();
-loadConfig();
+loadModels().then(() => loadConfig());
 setInterval(() => { loadStats(); }, 10000);
 </script>
 </body>

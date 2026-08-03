@@ -60,6 +60,8 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/keys/generate", corsHandler(handleAdminGenerateKey))
 	mux.HandleFunc("/admin/api/keys/delete", corsHandler(handleAdminDeleteKey))
 	mux.HandleFunc("/admin/api/models", corsHandler(handleAdminModels))
+	mux.HandleFunc("/admin/api/models/add", corsHandler(handleAdminModelAdd))
+	mux.HandleFunc("/admin/api/models/delete", corsHandler(handleAdminModelDelete))
 	mux.HandleFunc("/admin/api/config", corsHandler(handleAdminConfig))
 	mux.HandleFunc("/admin/api/config/update", corsHandler(handleAdminUpdateConfig))
 	mux.HandleFunc("/admin/api/request-logs", corsHandler(handleAdminRequestLogs))
@@ -732,12 +734,12 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		"strategy":     cfg.Strategy,
 		"version":      "go-1.1",
 		"poolPath":     poolPath,
-		"defaultModel": defaultModel,
+		"defaultModel": getDefaultModel(),
 		"headers":      cfg.Headers,
 	}})
 }
 
-// POST /admin/api/config  body: { strategy?, headers? }
+// POST /admin/api/config  body: { strategy?, headers?, defaultModel? }
 func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
@@ -751,8 +753,9 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var req struct {
-		Strategy string            `json:"strategy"`
-		Headers  map[string]string `json:"headers"`
+		Strategy     string            `json:"strategy"`
+		Headers      map[string]string `json:"headers"`
+		DefaultModel string            `json:"defaultModel"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
@@ -780,25 +783,164 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 
+	if req.DefaultModel != "" {
+		// 校验默认模型存在于可用模型列表中
+		found := false
+		for _, m := range getAllModels() {
+			if m.ID == req.DefaultModel {
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid default model, not in available models list"})
+			return
+		}
+		p := loadPool()
+		poolMu.Lock()
+		p.DefaultModel = req.DefaultModel
+		poolMu.Unlock()
+		savePool()
+	}
+
 	if changed {
 		setProxyConfig(cfg)
 	}
 
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
-		"strategy": cfg.Strategy,
-		"headers":  cfg.Headers,
+		"strategy":      cfg.Strategy,
+		"headers":       cfg.Headers,
+		"defaultModel":  getDefaultModel(),
 	}})
 }
 
 // GET /admin/api/models
 func handleAdminModels(w http.ResponseWriter, r *http.Request) {
-	models := []map[string]any{
-		{"id": "cline-free/glm-5.2", "provider": "zai", "cost": "free", "status": "active"},
-		{"id": "cline-pass/glm-5.2", "provider": "zai", "cost": "pass", "status": "active"},
-		{"id": "cline-pass/deepseek-v4-flash", "provider": "deepseek", "cost": "pass", "status": "active"},
-		{"id": "cline-pass/qwen3.7-max", "provider": "qwen", "cost": "pass", "status": "active"},
-	}
+	models := getAllModels()
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"models": models}})
+}
+
+// POST /admin/api/models/add  body: { id, provider?, cost? }
+func handleAdminModelAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		ID       string `json:"id"`
+		Provider string `json:"provider"`
+		Cost     string `json:"cost"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		return
+	}
+
+	if req.ID == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "model id is required"})
+		return
+	}
+
+	// 校验不与已有模型重复
+	for _, m := range getAllModels() {
+		if m.ID == req.ID {
+			writeAPI(w, http.StatusConflict, apiResponse{Error: "model already exists"})
+			return
+		}
+	}
+
+	// cost 默认为 pass
+	cost := req.Cost
+	if cost == "" {
+		cost = "pass"
+	}
+	// provider 可选，留空则从 ID 前缀推断
+	provider := req.Provider
+	if provider == "" {
+		if idx := strings.Index(req.ID, "/"); idx > 0 {
+			provider = req.ID[:idx]
+		} else {
+			provider = "custom"
+		}
+	}
+
+	p := loadPool()
+	poolMu.Lock()
+	p.Models = append(p.Models, Model{
+		ID:       req.ID,
+		Provider: provider,
+		Cost:     cost,
+		Status:   "active",
+		Custom:   true,
+	})
+	poolMu.Unlock()
+	savePool()
+
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "model added"})
+}
+
+// POST /admin/api/models/delete  body: { id }
+func handleAdminModelDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		return
+	}
+
+	if req.ID == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "model id is required"})
+		return
+	}
+
+	p := loadPool()
+	poolMu.Lock()
+	found := false
+	for i, m := range p.Models {
+		if m.ID == req.ID {
+			// 仅允许删除自定义模型
+			if !m.Custom {
+				poolMu.Unlock()
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: "cannot delete builtin model"})
+				return
+			}
+			p.Models = append(p.Models[:i], p.Models[i+1:]...)
+			found = true
+			break
+		}
+	}
+	if !found {
+		poolMu.Unlock()
+		writeAPI(w, http.StatusNotFound, apiResponse{Error: "model not found"})
+		return
+	}
+	// 若删除的是当前默认模型，则清空回退到内置默认
+	if p.DefaultModel == req.ID {
+		p.DefaultModel = ""
+	}
+	poolMu.Unlock()
+	savePool()
+
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "model deleted"})
 }
 
 // GET /admin/api/stats
