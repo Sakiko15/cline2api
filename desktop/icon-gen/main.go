@@ -1,4 +1,5 @@
 // 生成 Cline Go Proxy 桌面端图标：渐变背景 + 白色 "C" 形。
+// 同时嵌入 Windows 版本信息资源（文件属性页显示）和应用 manifest（DPI 感知/兼容性声明）。
 // 输出 resource_windows_amd64.syso，放在项目根目录后 go build 会自动链接。
 package main
 
@@ -9,6 +10,16 @@ import (
 	"os"
 
 	"github.com/tc-hib/winres"
+	"github.com/tc-hib/winres/version"
+)
+
+// 版本信息常量，打包发布时在此处更新。
+const (
+	appName      = "Cline2API"
+	appCompany   = "luawei1"
+	appVersion   = "1.1.0.0" // 与 build.sh 产物保持一致
+	appCopyright = "Copyright (c) 2026 luawei1"
+	appFileName  = "cline-proxy-desktop.exe"
 )
 
 func main() {
@@ -26,6 +37,35 @@ func main() {
 	if err := rs.SetIcon(winres.ID(3), icon); err != nil {
 		panic(err)
 	}
+
+	// 版本信息资源（Windows 文件属性 → 详细信息页显示）
+	vi := &version.Info{}
+	if err := vi.Set(version.LangDefault, version.CompanyName, appCompany); err != nil {
+		panic(err)
+	}
+	if err := vi.Set(version.LangDefault, version.ProductName, appName); err != nil {
+		panic(err)
+	}
+	if err := vi.Set(version.LangDefault, version.FileDescription, appName+" Desktop"); err != nil {
+		panic(err)
+	}
+	if err := vi.Set(version.LangDefault, version.LegalCopyright, appCopyright); err != nil {
+		panic(err)
+	}
+	if err := vi.Set(version.LangDefault, version.OriginalFilename, appFileName); err != nil {
+		panic(err)
+	}
+	vi.SetFileVersion(appVersion)
+	vi.SetProductVersion(appVersion)
+	rs.SetVersionInfo(*vi)
+
+	// 应用 manifest：asInvoker 权限 + 高 DPI 感知 + Win10/11 兼容性声明
+	rs.SetManifest(winres.AppManifest{
+		Description:    appName + " Desktop",
+		ExecutionLevel: winres.AsInvoker,
+		DPIAwareness:   winres.DPIPerMonitorV2,
+		Compatibility:  winres.Win10AndAbove,
+	})
 
 	out := "resource_windows_amd64.syso"
 	f, err := os.Create(out)

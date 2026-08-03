@@ -1,5 +1,6 @@
 .cline-accounts.json
 .cline-credentials.json
+.cline-request-logs.json
 cline-proxy
 cline-proxy.exe
 cline-proxy.exe~
@@ -10,10 +11,16 @@ cline-proxy.exe~
 
 # desktop build artifacts
 desktop/build/
+desktop/dist/
 desktop/*.exe
+desktop/icon-gen/resource_windows_amd64.syso
 cline-desktop
 cline-desktop.exe
+cline-proxy-desktop.exe
 cline-proxy-desktop-debug.exe
 
 # wails build output
 build/bin/
+
+# wails frontend scaffolding leftovers
+frontend/wailsjs/
