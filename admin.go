@@ -730,12 +730,14 @@ func handleAdminDeleteKey(w http.ResponseWriter, r *http.Request) {
 func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := getProxyConfig()
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
-		"address":      "127.0.0.1:3457",
+		"address":      fmt.Sprintf("%s:%d", effectiveAdminHost(listenHost), listenPort),
+		"host":         listenHost,
 		"strategy":     cfg.Strategy,
 		"version":      "go-1.1",
 		"poolPath":     poolPath,
 		"defaultModel": getDefaultModel(),
 		"headers":      cfg.Headers,
+		"localIPs":     detectLocalIPs(),
 	}})
 }
 

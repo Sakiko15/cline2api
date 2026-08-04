@@ -17,6 +17,8 @@ EXPOSE 3457
 VOLUME ["/app/data"]
 
 ENV PORT=3457
+ENV CLINE_PROXY_HOST=0.0.0.0
 
 ENTRYPOINT ["/app/cline-proxy"]
-CMD ["-port", "3457"]
+# 容器内必须监听 0.0.0.0，否则 -p 端口映射对外不可达
+CMD ["-host", "0.0.0.0", "-port", "3457"]

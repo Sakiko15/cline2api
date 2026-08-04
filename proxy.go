@@ -56,6 +56,55 @@ func getDefaultModel() string {
 	return fallbackDefaultModel
 }
 
+// 当前监听地址（startProxy 启动时赋值，供管理后台展示）。
+var (
+	listenHost string
+	listenPort int
+)
+
+// effectiveAdminHost 返回管理后台/浏览器实际可用的访问地址：
+// host 为空或通配地址（0.0.0.0 / ::）时展示回环 127.0.0.1，否则返回 host 本身。
+func effectiveAdminHost(host string) string {
+	switch host {
+	case "", "0.0.0.0", "::":
+		return "127.0.0.1"
+	}
+	return host
+}
+
+// detectLocalIPs 检测本机所有可用 IPv4 地址（排除回环、链路本地和未启用的网卡）。
+func detectLocalIPs() []string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	result := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := ipNet.IP
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		if v4 := ip.To4(); v4 != nil {
+			result = append(result, v4.String())
+		}
+	}
+	return result
+}
+
+// isLoopbackHost 判断监听地址是否为回环（127.x / localhost），用于安全提示。
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "", "localhost", "127.0.0.1":
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 var passThroughKeys = []string{
 	"tools", "tool_choice", "parallel_tool_calls", "functions", "function_call",
 	"temperature", "top_p", "top_k", "stop", "presence_penalty", "frequency_penalty",
@@ -76,7 +125,7 @@ type chatRequest struct {
 	Extra               map[string]any  `json:"-"`
 }
 
-func startProxy(port int) error {
+func startProxy(host string, port int) error {
 	p := loadPool()
 	loadRequestLogs()
 	activeCount := 0
@@ -267,7 +316,12 @@ func startProxy(port int) error {
 	mux.HandleFunc("/v1/messages", anthropicHandler)
 	mux.HandleFunc("/messages", anthropicHandler)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+	listenHost = host
+	listenPort = port
 	server := &http.Server{
 		Addr:    addr,
 		Handler: mux,
@@ -282,6 +336,12 @@ func startProxy(port int) error {
 	fmt.Println(strings.Repeat("=", 58))
 	fmt.Printf("  http://%s\n", addr)
 	fmt.Printf("  http://%s/v1\n", addr)
+	if !isLoopbackHost(host) {
+		for _, ip := range detectLocalIPs() {
+			fmt.Printf("  http://%s:%d (LAN)\n", ip, port)
+		}
+		fmt.Println("  !!! 监听非本机地址，管理后台无鉴权，请确认网络环境安全")
+	}
 	fmt.Println("  API Key: any value")
 	fmt.Printf("  Model:   %s\n", getDefaultModel())
 	fmt.Printf("  Accounts: %d total, %d active\n", len(loadPool().Accounts), activeCount)

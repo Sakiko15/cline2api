@@ -16,13 +16,14 @@ func main() {
 	loginMode := flag.Bool("login", false, "Run OAuth device login flow and add account to pool")
 	captureMode := flag.Bool("capture", false, "Run interactive OAuth capture (records ALL traffic)")
 	port := flag.Int("port", 3457, "Proxy server port")
+	host := flag.String("host", configuredHost(), "Proxy server listen host (0.0.0.0 = all interfaces)")
 	addAccount := flag.Bool("add-account", false, "Add a new account via OAuth to the pool")
 	showList := flag.Bool("list", false, "List all accounts in the pool")
 	startMode := flag.Bool("start", false, "Build, start proxy, and open admin panel in browser")
 	flag.Parse()
 
 	if *startMode {
-		buildAndStart(*port)
+		buildAndStart(*host, *port)
 		return
 	}
 
@@ -61,13 +62,21 @@ func main() {
 		return
 	}
 
-	if err := startProxy(*port); err != nil {
+	if err := startProxy(*host, *port); err != nil {
 		log.Fatalf("Proxy failed: %v", err)
 		os.Exit(1)
 	}
 }
 
-func buildAndStart(port int) {
+// configuredHost 返回监听地址：优先环境变量 CLINE_PROXY_HOST，默认 127.0.0.1。
+func configuredHost() string {
+	if v := os.Getenv("CLINE_PROXY_HOST"); v != "" {
+		return v
+	}
+	return "127.0.0.1"
+}
+
+func buildAndStart(host string, port int) {
 	exe := "cline-proxy.exe"
 	if runtime.GOOS != "windows" {
 		exe = "./cline-proxy"
@@ -107,7 +116,7 @@ func buildAndStart(port int) {
 		fmt.Println("Proxy started.")
 	}
 
-	url := fmt.Sprintf("http://127.0.0.1:%d/admin/", port)
+	url := fmt.Sprintf("http://%s:%d/admin/", effectiveAdminHost(host), port)
 	fmt.Printf("\nAdmin panel: %s\n", url)
 
 	switch runtime.GOOS {

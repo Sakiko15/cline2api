@@ -191,6 +191,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 .model-tag.pass{border-color:var(--yellow);color:var(--yellow);background:var(--yellow-soft)}
 .model-item{display:inline-flex;align-items:center;gap:2px;margin:3px}
 .model-item .model-tag{margin:0}
+.warn-box{display:flex;align-items:flex-start;gap:8px;margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--yellow-soft);color:var(--yellow);font-size:13px;line-height:1.5;border:1px solid var(--yellow)}
 
 /* action row */
 .action-row{display:flex;gap:8px;flex-wrap:wrap}
@@ -531,6 +532,13 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <div class="form-row">
         <div class="field"><label>监听地址</label><input type="text" id="settingAddr" disabled></div>
         <div class="field"><label>默认模型</label><select id="settingDefModel" onchange="updateConfig()"><option value="">加载中...</option></select></div>
+      </div>
+      <div id="listenWarn" class="warn-box" style="display:none">⚠️ 当前监听非本机回环地址（0.0.0.0 或局域网 IP），管理后台无鉴权，局域网内任何设备都可访问。请确认网络环境安全，或配合防火墙限制端口。</div>
+      <div id="localIPsRow" class="form-row" style="display:none">
+        <div class="field" style="flex:1">
+          <label>本机 IP（局域网访问地址）</label>
+          <div id="localIPsList"></div>
+        </div>
       </div>
       <div class="form-row">
         <div class="field">
@@ -1206,6 +1214,20 @@ async function loadConfig() {
       ).join('');
       sel.innerHTML = opts || '<option value="">（无可用模型）</option>';
     }
+    // 本机 IP 展示（监听 0.0.0.0 时局域网访问地址）
+    const ips = c.localIPs || [];
+    if (ips.length) {
+      _('localIPsRow').style.display = '';
+      _('localIPsList').innerHTML = ips.map(ip =>
+        '<span class="model-tag free">' + esc(ip) + '</span>'
+      ).join('');
+    } else {
+      _('localIPsRow').style.display = 'none';
+    }
+    // 非回环监听安全警告（0.0.0.0 / 局域网 IP 都会暴露管理后台）
+    const h = c.host || '';
+    const safeHosts = ['', '127.0.0.1', 'localhost', '::1'];
+    _('listenWarn').style.display = (safeHosts.indexOf(h) === -1) ? '' : 'none';
     if (c.headers) {
       const tbody = _('headersTableBody');
       tbody.innerHTML = Object.entries(c.headers).map(([k, v]) =>
