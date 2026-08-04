@@ -17,7 +17,9 @@ OS=$(go env GOOS)
 ARCH=$(go env GOARCH)
 OUT="$ROOT/desktop/build/$OS-$ARCH"
 NAME="cline-proxy-desktop"
-LDFLAGS="-s -w"
+# 版本号：优先环境变量 VERSION，否则取最近 git tag（如 v1.3.0），再退回 dev
+VERSION=${VERSION:-$(git describe --tags --always 2>/dev/null || echo "dev")}
+LDFLAGS="-s -w -X main.appVersion=$VERSION"
 
 if [ "$OS" = "windows" ]; then
   NAME="$NAME.exe"
@@ -28,4 +30,4 @@ fi
 mkdir -p "$OUT"
 cd "$ROOT"
 go build -tags "desktop production" -trimpath -ldflags="$LDFLAGS" -o "$OUT/$NAME" .
-printf 'Built: %s\n' "$OUT/$NAME"
+printf 'Built: %s (version %s)\n' "$OUT/$NAME" "$VERSION"

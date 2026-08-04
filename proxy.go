@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -61,6 +63,49 @@ var (
 	listenHost string
 	listenPort int
 )
+
+// HTTP server 实例与路由表（restartListener 换地址重启时复用）。
+var (
+	serverMux     *http.ServeMux
+	currentServer *http.Server
+	serverMu      sync.Mutex
+)
+
+// restartListener 用新地址重启 HTTP 监听。
+// 注意：必须在 goroutine 中调用——Shutdown 会等待当前 HTTP 请求完成，
+// 若在 admin handler 内同步调用会死锁。
+func restartListener(host string, port int) error {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+	listenHost = host
+	listenPort = port
+
+	serverMu.Lock()
+	old := currentServer
+	server := &http.Server{Addr: addr, Handler: serverMux}
+	currentServer = server
+	serverMu.Unlock()
+
+	if old != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = old.Shutdown(ctx)
+		cancel()
+	}
+
+	fmt.Println("")
+	fmt.Println(strings.Repeat("=", 58))
+	fmt.Printf("  Listener restarted: %s\n", addr)
+	if !isLoopbackHost(host) {
+		for _, ip := range detectLocalIPs() {
+			fmt.Printf("  http://%s:%d (LAN)\n", ip, port)
+		}
+		fmt.Println("  !!! 监听非本机地址，管理后台无鉴权，请确认网络环境安全")
+	}
+	fmt.Println(strings.Repeat("=", 58))
+	return server.ListenAndServe()
+}
 
 // effectiveAdminHost 返回管理后台/浏览器实际可用的访问地址：
 // host 为空或通配地址（0.0.0.0 / ::）时展示回环 127.0.0.1，否则返回 host 本身。
@@ -150,7 +195,7 @@ func startProxy(host string, port int) error {
 	mux.HandleFunc("/v1/health", corsHandler(func(w http.ResponseWriter, r *http.Request) {
 		info := map[string]any{
 			"status":         "ok",
-			"version":        "go-1.1",
+			"version":        appVersion,
 			"activeAccounts": activeCount,
 		}
 		writeJSON(w, http.StatusOK, info)
@@ -158,7 +203,7 @@ func startProxy(host string, port int) error {
 	mux.HandleFunc("/health", corsHandler(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":         "ok",
-			"version":        "go-1.1",
+			"version":        appVersion,
 			"activeAccounts": activeCount,
 		})
 	}))
@@ -322,17 +367,21 @@ func startProxy(host string, port int) error {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	listenHost = host
 	listenPort = port
+	serverMux = mux
 	server := &http.Server{
 		Addr:    addr,
 		Handler: mux,
 	}
+	serverMu.Lock()
+	currentServer = server
+	serverMu.Unlock()
 
 	// 启动后台冷却恢复巡检
 	startCooldownRecovery()
 
 	fmt.Println("")
 	fmt.Println(strings.Repeat("=", 58))
-	fmt.Println("  Cline Go Proxy v1.0 - No CLI Required")
+	fmt.Printf("  Cline Go Proxy %s - No CLI Required\n", appVersion)
 	fmt.Println(strings.Repeat("=", 58))
 	fmt.Printf("  http://%s\n", addr)
 	fmt.Printf("  http://%s/v1\n", addr)

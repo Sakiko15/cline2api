@@ -300,7 +300,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   <div class="sidebar-footer">
     <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
       <span style="font-weight:600;color:var(--text)">Cline2API</span>
-      <span style="font-size:11px;opacity:0.7">v1.0.0</span>
+      <span id="footerVersion" style="font-size:11px;opacity:0.7">dev</span>
     </div>
     <div style="margin-bottom:4px">API: <span id="footerApiAddr">127.0.0.1:3457</span></div>
     <div><a href="#" onclick="openExternal('https://github.com/luawei1/cline2api');return false">GitHub</a> · <a href="#" onclick="openExternal('https://github.com/luawei1/cline2api/issues');return false">反馈</a> · MIT</div>
@@ -527,11 +527,17 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
   </div>
 
   <div class="section">
-    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>代理配置</div>
+    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>访问设置</div>
     <div class="section-body">
       <div class="form-row">
-        <div class="field"><label>监听地址</label><input type="text" id="settingAddr" disabled></div>
-        <div class="field"><label>默认模型</label><select id="settingDefModel" onchange="updateConfig()"><option value="">加载中...</option></select></div>
+        <div class="field">
+          <label>监听地址</label>
+          <select id="settingListenHost" onchange="saveListenHost()">
+            <option value="127.0.0.1">127.0.0.1（仅本机）</option>
+            <option value="0.0.0.0">0.0.0.0（所有网卡）</option>
+          </select>
+        </div>
+        <div class="field"><label>当前地址</label><input type="text" id="settingAddr" disabled></div>
       </div>
       <div id="listenWarn" class="warn-box" style="display:none">⚠️ 当前监听非本机回环地址（0.0.0.0 或局域网 IP），管理后台无鉴权，局域网内任何设备都可访问。请确认网络环境安全，或配合防火墙限制端口。</div>
       <div id="localIPsRow" class="form-row" style="display:none">
@@ -539,6 +545,25 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
           <label>本机 IP（局域网访问地址）</label>
           <div id="localIPsList"></div>
         </div>
+      </div>
+      <div class="form-row" style="margin-top:12px">
+        <div class="field" style="flex:1">
+          <label>管理后台密码（<span id="passwordStatus">未启用</span>）</label>
+          <div style="display:flex;gap:8px">
+            <input type="password" id="settingPassword" placeholder="留空保存 = 清除密码" autocomplete="new-password" style="flex:1">
+            <button class="btn btn-primary" onclick="savePassword()">保存</button>
+          </div>
+          <div style="font-size:12px;color:var(--text3);margin-top:4px">设置后访问管理后台需输入密码，默认无密码</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>代理配置</div>
+    <div class="section-body">
+      <div class="form-row">
+        <div class="field"><label>默认模型</label><select id="settingDefModel" onchange="updateConfig()"><option value="">加载中...</option></select></div>
       </div>
       <div class="form-row">
         <div class="field">
@@ -602,7 +627,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
         <div>
           <div style="font-size:20px;font-weight:700;color:var(--text)">Cline2API</div>
           <div style="font-size:13px;color:var(--text2);margin-top:2px">Cline API 反向代理 · 多账号轮询 · 双协议兼容</div>
-          <div style="font-size:12px;color:var(--text3);margin-top:4px">版本 v1.0.0 · MIT License · Go 1.25 + Wails v2</div>
+          <div style="font-size:12px;color:var(--text3);margin-top:4px"><span id="aboutVersion">版本 dev</span> · MIT License · Go 1.25 + Wails v2</div>
         </div>
       </div>
     </div>
@@ -689,6 +714,16 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 
 <div id="toast" class="toast"></div>
 
+<div id="loginOverlay" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(248,250,252,0.96);align-items:center;justify-content:center">
+  <div style="width:min(360px,calc(100vw - 40px));padding:32px;background:var(--surface);border-radius:14px;border:1px solid var(--border2);text-align:center;box-shadow:0 10px 40px rgba(15,23,42,0.12)">
+    <h2 style="margin:0 0 6px;font-size:20px;color:var(--text)">Cline2API 管理后台</h2>
+    <p style="margin:0 0 22px;color:var(--text2);font-size:13px">该后台已启用访问密码，请输入密码登录</p>
+    <input type="password" id="loginPassword" placeholder="访问密码" autocomplete="current-password" style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid var(--border2);background:var(--surface2);color:var(--text);font-size:14px" onkeydown="if(event.key==='Enter')submitLogin()">
+    <button class="btn btn-primary" style="width:100%;margin-top:14px" onclick="submitLogin()">登 录</button>
+    <div id="loginError" style="color:var(--red);font-size:13px;margin-top:12px"></div>
+  </div>
+</div>
+
 <script>
 const API = '/admin/api';
 
@@ -764,9 +799,41 @@ async function api(method, path, body) {
   const opts = { method, headers: {} };
   if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const res = await fetch(API + path, opts);
+  if (res.status === 401) {
+    showLogin();
+    throw new Error('需要登录');
+  }
   const data = await res.json();
   if (!data.success && data.error) throw new Error(data.error);
   return data;
+}
+
+// ========== 后台登录 ==========
+function showLogin() {
+  const ov = _('loginOverlay');
+  if (ov && ov.style.display !== 'flex') {
+    ov.style.display = 'flex';
+    setTimeout(() => _('loginPassword').focus(), 50);
+  }
+}
+
+async function submitLogin() {
+  const pwd = _('loginPassword').value;
+  if (!pwd) return;
+  _('loginError').textContent = '';
+  try {
+    const res = await fetch(API + '/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pwd })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      location.reload();
+    } else {
+      _('loginError').textContent = data.error || '登录失败';
+      _('loginPassword').value = '';
+    }
+  } catch (e) { _('loginError').textContent = '网络错误，请重试'; }
 }
 
 // 用系统默认浏览器打开外部链接（桌面 WebView 内导航不会跳外部浏览器，需走后端）
@@ -1121,6 +1188,35 @@ async function updateConfig() {
   } catch (e) { toast('更新失败: ' + e.message, 'error'); }
 }
 
+// 保存监听地址：保存后程序自动重启监听（立即生效）
+async function saveListenHost() {
+  const host = _('settingListenHost').value;
+  if (!host) return;
+  try {
+    const d = await api('POST', '/config/update', { host });
+    const safe = ['127.0.0.1', 'localhost', '::1', '0.0.0.0'].indexOf(host) !== -1;
+    if (safe) {
+      toast('已保存，正在重启监听...', 'success');
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      toast('监听已切换，请通过 ' + (d.data.address || host) + ' 访问管理后台', 'success');
+    }
+    await loadConfig();
+  } catch (e) { toast('保存失败: ' + e.message, 'error'); }
+}
+
+// 保存/清除管理后台密码（留空 = 清除）
+async function savePassword() {
+  const pwd = _('settingPassword').value;
+  if (pwd && pwd.length < 4) { toast('密码至少 4 位', 'error'); return; }
+  try {
+    await api('POST', '/password', { password: pwd });
+    _('settingPassword').value = '';
+    toast(pwd ? '密码已设置，后台需要重新登录' : '已清除密码', 'success');
+    await loadConfig();
+  } catch (e) { toast('保存失败: ' + e.message, 'error'); }
+}
+
 function addHeaderRow() {
   const tbody = _('headersTableBody');
   const tr = document.createElement('tr');
@@ -1205,6 +1301,10 @@ async function loadConfig() {
     if (c.address) _('settingAddr').value = c.address;
     if (c.strategy) _('settingStrategy').value = c.strategy;
     if (c.version) _('settingVersion').value = c.version;
+    if (c.version) {
+      if (_('footerVersion')) _('footerVersion').textContent = c.version;
+      if (_('aboutVersion')) _('aboutVersion').textContent = '版本 ' + c.version;
+    }
     if (c.poolPath) _('settingPoolPath').value = c.poolPath;
     if (c.defaultModel !== undefined) {
       const sel = _('settingDefModel');
@@ -1224,6 +1324,20 @@ async function loadConfig() {
     } else {
       _('localIPsRow').style.display = 'none';
     }
+    // 监听地址下拉：补入本机 IP 选项并选中当前值
+    const listenSel = _('settingListenHost');
+    if (listenSel) {
+      if (!listenSel.dataset.inited) {
+        listenSel.dataset.inited = '1';
+        let opts = '<option value="127.0.0.1">127.0.0.1（仅本机）</option>';
+        opts += '<option value="0.0.0.0">0.0.0.0（所有网卡）</option>';
+        opts += ips.map(ip => '<option value="' + esc(ip) + '">' + esc(ip) + '（本机网卡）</option>').join('');
+        listenSel.innerHTML = opts;
+      }
+      if (c.host) listenSel.value = c.host;
+    }
+    // 后台密码状态
+    if (c.hasPassword !== undefined) _('passwordStatus').textContent = c.hasPassword ? '已启用' : '未启用';
     // 非回环监听安全警告（0.0.0.0 / 局域网 IP 都会暴露管理后台）
     const h = c.host || '';
     const safeHosts = ['', '127.0.0.1', 'localhost', '::1'];

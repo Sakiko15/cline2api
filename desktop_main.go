@@ -60,6 +60,9 @@ func configuredDesktopHost() string {
 	if value := os.Getenv("CLINE_PROXY_HOST"); value != "" {
 		return value
 	}
+	if value := loadPool().ListenHost; value != "" {
+		return value
+	}
 	return "127.0.0.1"
 }
 

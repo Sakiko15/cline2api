@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
@@ -62,15 +63,20 @@ func main() {
 		return
 	}
 
-	if err := startProxy(*host, *port); err != nil {
+	if err := startProxy(*host, *port); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Proxy failed: %v", err)
 		os.Exit(1)
 	}
+	// 监听被 restartListener 接管（重启后原 ListenAndServe 返回 ErrServerClosed），主 goroutine 保持阻塞
+	select {}
 }
 
-// configuredHost 返回监听地址：优先环境变量 CLINE_PROXY_HOST，默认 127.0.0.1。
+// configuredHost 返回监听地址：环境变量 > 后台保存的 listenHost > 默认 127.0.0.1。
 func configuredHost() string {
 	if v := os.Getenv("CLINE_PROXY_HOST"); v != "" {
+		return v
+	}
+	if v := loadPool().ListenHost; v != "" {
 		return v
 	}
 	return "127.0.0.1"

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,31 +44,206 @@ func writeAPI(w http.ResponseWriter, status int, resp apiResponse) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// 管理后台登录会话（内存态，程序重启后需重新登录）。
+var (
+	adminSessions   = make(map[string]time.Time)
+	adminSessionsMu sync.Mutex
+)
+
+const (
+	adminSessionCookie = "cline_admin_session"
+	adminSessionTTL    = 24 * time.Hour
+)
+
 func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/", adminStaticHandler)
-	mux.HandleFunc("/admin/api/accounts", corsHandler(handleAdminAccounts))
-	mux.HandleFunc("/admin/api/accounts/add", corsHandler(handleAdminAccountAdd))
-	mux.HandleFunc("/admin/api/accounts/delete", corsHandler(handleAdminAccountDelete))
-	mux.HandleFunc("/admin/api/accounts/export", corsHandler(handleExportAccounts))
-	mux.HandleFunc("/admin/api/oauth/start", corsHandler(handleOAuthStart))
-	mux.HandleFunc("/admin/api/oauth/status", corsHandler(handleOAuthStatus))
-	mux.HandleFunc("/admin/api/sso/import", corsHandler(handleSSOImport))
-	mux.HandleFunc("/admin/api/stats", corsHandler(handleAdminStats))
-	mux.HandleFunc("/admin/api/batch-import", corsHandler(handleBatchImport))
-	mux.HandleFunc("/admin/api/accounts/refresh-all", corsHandler(handleAdminRefreshAll))
-	mux.HandleFunc("/admin/api/accounts/delete-all", corsHandler(handleAdminDeleteAll))
-	mux.HandleFunc("/admin/api/accounts/reset", corsHandler(handleAdminAccountReset))
-	mux.HandleFunc("/admin/api/accounts/test", corsHandler(handleAdminAccountTest))
-	mux.HandleFunc("/admin/api/keys", corsHandler(handleAdminGetKeys))
-	mux.HandleFunc("/admin/api/keys/generate", corsHandler(handleAdminGenerateKey))
-	mux.HandleFunc("/admin/api/keys/delete", corsHandler(handleAdminDeleteKey))
-	mux.HandleFunc("/admin/api/models", corsHandler(handleAdminModels))
-	mux.HandleFunc("/admin/api/models/add", corsHandler(handleAdminModelAdd))
-	mux.HandleFunc("/admin/api/models/delete", corsHandler(handleAdminModelDelete))
-	mux.HandleFunc("/admin/api/config", corsHandler(handleAdminConfig))
-	mux.HandleFunc("/admin/api/config/update", corsHandler(handleAdminUpdateConfig))
-	mux.HandleFunc("/admin/api/request-logs", corsHandler(handleAdminRequestLogs))
-	mux.HandleFunc("/admin/api/open-external", corsHandler(handleOpenExternal))
+	// 无需登录的接口
+	mux.HandleFunc("/admin/api/login", corsHandler(handleAdminLogin))
+	mux.HandleFunc("/admin/api/logout", corsHandler(handleAdminLogout))
+	// 其余 API 全部需要后台鉴权（设置了密码后）
+	auth := func(h http.HandlerFunc) http.HandlerFunc {
+		return requireAdminAuth(corsHandler(h))
+	}
+	mux.HandleFunc("/admin/api/accounts", auth(handleAdminAccounts))
+	mux.HandleFunc("/admin/api/accounts/add", auth(handleAdminAccountAdd))
+	mux.HandleFunc("/admin/api/accounts/delete", auth(handleAdminAccountDelete))
+	mux.HandleFunc("/admin/api/accounts/export", auth(handleExportAccounts))
+	mux.HandleFunc("/admin/api/oauth/start", auth(handleOAuthStart))
+	mux.HandleFunc("/admin/api/oauth/status", auth(handleOAuthStatus))
+	mux.HandleFunc("/admin/api/sso/import", auth(handleSSOImport))
+	mux.HandleFunc("/admin/api/stats", auth(handleAdminStats))
+	mux.HandleFunc("/admin/api/batch-import", auth(handleBatchImport))
+	mux.HandleFunc("/admin/api/accounts/refresh-all", auth(handleAdminRefreshAll))
+	mux.HandleFunc("/admin/api/accounts/delete-all", auth(handleAdminDeleteAll))
+	mux.HandleFunc("/admin/api/accounts/reset", auth(handleAdminAccountReset))
+	mux.HandleFunc("/admin/api/accounts/test", auth(handleAdminAccountTest))
+	mux.HandleFunc("/admin/api/keys", auth(handleAdminGetKeys))
+	mux.HandleFunc("/admin/api/keys/generate", auth(handleAdminGenerateKey))
+	mux.HandleFunc("/admin/api/keys/delete", auth(handleAdminDeleteKey))
+	mux.HandleFunc("/admin/api/models", auth(handleAdminModels))
+	mux.HandleFunc("/admin/api/models/add", auth(handleAdminModelAdd))
+	mux.HandleFunc("/admin/api/models/delete", auth(handleAdminModelDelete))
+	mux.HandleFunc("/admin/api/config", auth(handleAdminConfig))
+	mux.HandleFunc("/admin/api/config/update", auth(handleAdminUpdateConfig))
+	mux.HandleFunc("/admin/api/password", auth(handleAdminPassword))
+	mux.HandleFunc("/admin/api/request-logs", auth(handleAdminRequestLogs))
+	mux.HandleFunc("/admin/api/open-external", auth(handleOpenExternal))
+}
+
+// requireAdminAuth 后台访问鉴权中间件：未设置密码直接放行，否则校验会话 cookie。
+func requireAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if loadPool().AdminPasswordHash == "" {
+			next(w, r)
+			return
+		}
+		c, err := r.Cookie(adminSessionCookie)
+		if err != nil {
+			writeAPI(w, http.StatusUnauthorized, apiResponse{Error: "需要登录"})
+			return
+		}
+		adminSessionsMu.Lock()
+		expiry, ok := adminSessions[c.Value]
+		if ok {
+			if time.Now().Before(expiry) {
+				adminSessionsMu.Unlock()
+				next(w, r)
+				return
+			}
+			delete(adminSessions, c.Value)
+		}
+		adminSessionsMu.Unlock()
+		writeAPI(w, http.StatusUnauthorized, apiResponse{Error: "登录已过期，请重新登录"})
+	}
+}
+
+// hashAdminPassword 生成加盐密码哈希：hex(sha256(salt+password))。
+func hashAdminPassword(saltHex, password string) string {
+	sum := sha256.Sum256([]byte(saltHex + password))
+	return hex.EncodeToString(sum[:])
+}
+
+// setAdminPassword 设置/修改/清除后台密码（空 = 清除），并清空所有会话强制重新登录。
+func setAdminPassword(password string) {
+	p := loadPool()
+	poolMu.Lock()
+	if password == "" {
+		p.AdminPasswordHash = ""
+		p.AdminPasswordSalt = ""
+	} else {
+		salt := make([]byte, 16)
+		if _, err := rand.Read(salt); err != nil {
+			salt = []byte(time.Now().Format("20060102150405"))
+		}
+		p.AdminPasswordSalt = hex.EncodeToString(salt)
+		p.AdminPasswordHash = hashAdminPassword(p.AdminPasswordSalt, password)
+	}
+	poolMu.Unlock()
+	savePool()
+	adminSessionsMu.Lock()
+	adminSessions = make(map[string]time.Time)
+	adminSessionsMu.Unlock()
+}
+
+// verifyAdminPassword 校验后台密码（未设置密码时返回 false）。
+func verifyAdminPassword(password string) bool {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	if p.AdminPasswordHash == "" {
+		return false
+	}
+	return hashAdminPassword(p.AdminPasswordSalt, password) == p.AdminPasswordHash
+}
+
+// randomHex 生成 n 字节随机数的 hex 字符串。
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b)
+}
+
+// POST /admin/api/login  body: {password}
+func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		return
+	}
+	if loadPool().AdminPasswordHash == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "后台未启用密码"})
+		return
+	}
+	if !verifyAdminPassword(req.Password) {
+		time.Sleep(500 * time.Millisecond) // 防爆破
+		writeAPI(w, http.StatusUnauthorized, apiResponse{Error: "密码错误"})
+		return
+	}
+	token := randomHex(32)
+	adminSessionsMu.Lock()
+	adminSessions[token] = time.Now().Add(adminSessionTTL)
+	adminSessionsMu.Unlock()
+	http.SetCookie(w, &http.Cookie{
+		Name:     adminSessionCookie,
+		Value:    token,
+		Path:     "/admin",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(adminSessionTTL.Seconds()),
+	})
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "登录成功"})
+}
+
+// POST /admin/api/logout
+func handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(adminSessionCookie); err == nil {
+		adminSessionsMu.Lock()
+		delete(adminSessions, c.Value)
+		adminSessionsMu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{Name: adminSessionCookie, Value: "", Path: "/admin", MaxAge: -1})
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "已退出登录"})
+}
+
+// POST /admin/api/password  body: {password}（空 = 清除密码，恢复无密码访问）
+func handleAdminPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		return
+	}
+	setAdminPassword(req.Password)
+	if req.Password == "" {
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "已清除后台密码"})
+	} else {
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "后台密码已更新"})
+	}
 }
 
 func adminStaticHandler(w http.ResponseWriter, r *http.Request) {
@@ -733,15 +911,16 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		"address":      fmt.Sprintf("%s:%d", effectiveAdminHost(listenHost), listenPort),
 		"host":         listenHost,
 		"strategy":     cfg.Strategy,
-		"version":      "go-1.1",
+		"version":      appVersion,
 		"poolPath":     poolPath,
 		"defaultModel": getDefaultModel(),
 		"headers":      cfg.Headers,
 		"localIPs":     detectLocalIPs(),
+		"hasPassword":  loadPool().AdminPasswordHash != "",
 	}})
 }
 
-// POST /admin/api/config  body: { strategy?, headers?, defaultModel? }
+// POST /admin/api/config  body: { strategy?, headers?, defaultModel?, host? }
 func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
@@ -758,6 +937,7 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		Strategy     string            `json:"strategy"`
 		Headers      map[string]string `json:"headers"`
 		DefaultModel string            `json:"defaultModel"`
+		Host         string            `json:"host"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
@@ -766,6 +946,7 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	cfg := getProxyConfig()
 	changed := false
+	restarting := false
 
 	if req.Strategy != "" {
 		switch req.Strategy {
@@ -805,14 +986,49 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		savePool()
 	}
 
+	if req.Host != "" {
+		// 校验监听地址：回环 / 0.0.0.0 / 本机检测到的 IP
+		valid := req.Host == "127.0.0.1" || req.Host == "0.0.0.0" || req.Host == "localhost" || req.Host == "::1"
+		if !valid {
+			for _, ip := range detectLocalIPs() {
+				if ip == req.Host {
+					valid = true
+					break
+				}
+			}
+		}
+		if !valid {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid host, must be 127.0.0.1, 0.0.0.0 or a local IP"})
+			return
+		}
+		p := loadPool()
+		poolMu.Lock()
+		p.ListenHost = req.Host
+		poolMu.Unlock()
+		savePool()
+		restarting = true
+	}
+
 	if changed {
 		setProxyConfig(cfg)
+	}
+
+	if restarting {
+		// 异步重启监听（Shutdown 会等待当前请求完成，不能在 handler 内同步调用）
+		go func() {
+			if err := restartListener(req.Host, listenPort); err != nil && err != http.ErrServerClosed {
+				log.Printf("Listener restart failed: %v", err)
+			}
+		}()
 	}
 
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
 		"strategy":      cfg.Strategy,
 		"headers":       cfg.Headers,
 		"defaultModel":  getDefaultModel(),
+		"host":          listenHost,
+		"address":       fmt.Sprintf("%s:%d", effectiveAdminHost(listenHost), listenPort),
+		"restarting":    restarting,
 	}})
 }
 
@@ -984,7 +1200,7 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			"totalTokens":      totalTokens,
 			"cachedTokens":     cachedTokens,
 			"strategy":         "round_robin",
-			"version":          "go-1.1",
+			"version":          appVersion,
 		},
 	})
 }
