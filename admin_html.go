@@ -895,6 +895,9 @@ const I18N = {
   '加载账号失败: ': 'Failed to load accounts: ',
   ' · 输入 ': ' · Input ',
   ' · 输出 ': ' · Output ',
+  ' · 缓存 ': ' · Cached ',
+  ' · 总 ': ' · Total ',
+  '输入 ': 'Input ',
   '测试成功：': 'Test OK: ',
   '测试失败：': 'Test failed: ',
   '未知错误': 'Unknown error',
@@ -983,6 +986,7 @@ const I18N = {
   '模型冷却中': 'Model cooling',
   '模型冷却中，约 ': 'Model cooling, ~',
   '后释放': ' until release',
+  '暂无数据': 'No data yet',
 };
 let LANG = 'zh';
 const LC = () => LANG === 'en' ? 'en-US' : 'zh-CN';
@@ -992,32 +996,46 @@ function detectLang(){
   return (navigator.language||'').toLowerCase().startsWith('zh') ? 'zh' : 'en';
 }
 function t(s){ if (LANG==='en' && s && I18N[s]) return I18N[s]; return s; }
+// 反向映射：英文 → 中文（用于切回中文时还原静态文本）
+const I18N_REV = Object.keys(I18N).reduce((acc, k) => { acc[I18N[k]] = k; return acc; }, {});
 function applyLang(){
-  if (LANG !== 'en') { document.title = 'Cline 代理管理面板'; return; }
-  document.title = 'Cline Proxy Admin';
+  if (LANG === 'en') {
+    document.title = 'Cline Proxy Admin';
+  } else {
+    document.title = 'Cline 代理管理面板';
+  }
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   const nodes = [];
   while (walker.nextNode()) nodes.push(walker.currentNode);
+  const dict = (LANG === 'en') ? I18N : I18N_REV;
   for (const n of nodes){
     const txt = n.nodeValue;
     if (!txt) continue;
     const trimmed = txt.trim();
-    if (trimmed && I18N[trimmed] && I18N[trimmed] !== trimmed){
-      n.nodeValue = txt.replace(trimmed, I18N[trimmed]);
+    if (trimmed && dict[trimmed] && dict[trimmed] !== trimmed){
+      n.nodeValue = txt.replace(trimmed, dict[trimmed]);
     }
   }
   document.querySelectorAll('[title]').forEach(el=>{
     const k=(el.getAttribute('title')||'').trim();
-    if (k && I18N[k]) el.setAttribute('title', I18N[k]);
+    if (k && dict[k]) el.setAttribute('title', dict[k]);
   });
-  _('langZh').classList.toggle('active', false);
-  if (_('langEn')) _('langEn').classList.toggle('active', true);
+  _('langZh').classList.toggle('active', LANG === 'zh');
+  if (_('langEn')) _('langEn').classList.toggle('active', LANG === 'en');
 }
 function setLang(l){
   LANG = l;
   try { document.cookie = 'cline_admin_lang='+l+';path=/admin;max-age=31536000'; } catch(e){}
   try { localStorage.setItem('cline_admin_lang', l); } catch(e){}
-  location.reload();
+  document.documentElement.lang = (l==='en')?'en':'zh-CN';
+  // 即时切换：静态文本 + title 属性翻译 + 重新渲染动态数据，不整页刷新
+  applyLang();
+  loadStats();
+  loadAccounts();
+  loadRequestLogs(true);
+  if (_('modelsList')) loadModels();
+  if (_('settingDefModel')) loadConfig();
+  toast(l === 'en' ? 'Language switched to English' : '语言已切换为中文', 'success');
 }
 LANG = detectLang();
 document.documentElement.lang = (LANG==='en')?'en':'zh-CN';
@@ -1202,23 +1220,23 @@ async function loadAccounts() {
         '</tr>'
       ).join('');
       const totalCooling = Object.keys(cools).length;
-      if (!rows && !extraCools) return '';
       const title = '<tr style="background:var(--surface2)">' +
         '<td colspan="10" style="padding:8px 32px;color:var(--text2);font-size:12px;font-weight:600">' +
           t('按模型统计（仅免费模型）') + (totalCooling ? ' · <span style="color:var(--yellow)">⏳ ' + totalCooling + ' ' + t('模型冷却中') + '</span>' : '') +
         '</td></tr>';
+      if (!rows && !extraCools) {
+        return title + '<tr style="background:var(--surface2)"><td colspan="10" style="padding:6px 32px;color:var(--text3);font-size:12px">' + t('暂无数据') + '</td></tr>';
+      }
       return title + rows + extraCools;
     };
     tbody.innerHTML = list.map(a => {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString(LC()) : '-';
       const cr = a.createdAt ? new Date(a.createdAt).toLocaleString(LC()) : '-';
-      const hasModelData = (a.modelStats && Object.keys(a.modelStats).length) || (a.modelCooldowns && Object.keys(a.modelCooldowns).length);
       const statusBadge = a.status === 'cooldown' && a.cooldownUntil
         ? '<span class="status cooldown status-cooldown" title="' + t('冷却 · 剩余 ') + formatCooldown(a.cooldownUntil) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(a.cooldownUntil) + '</span></span>'
         : '<span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span>';
-      const expander = hasModelData
-        ? '<button class="btn btn-sm btn-icon" onclick="toggleModelRow(\'' + a.accountId + '\', this)" title="' + t('展开') + '">▸</button>'
-        : '';
+      // 始终显示模型统计展开按钮（无数据时子行提示暂无）
+      const expander = '<button class="btn btn-sm btn-icon" onclick="toggleModelRow(\'' + a.accountId + '\', this)" title="' + t('展开') + '">▸</button>';
       return '<tr>' +
         '<td>' + esc(a.email) + '</td>' +
         '<td>' + statusBadge + '</td>' +
@@ -1234,38 +1252,35 @@ async function loadAccounts() {
           '<button class="btn btn-sm" onclick="resetAccount(\'' + a.accountId + '\')" title="重置">↻</button> ' +
           '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.accountId + '\')" title="删除">✕</button>' +
         '</td></tr>' +
-        (hasModelData ? '<tr id="modelRow-' + a.accountId + '" style="display:none"><td colspan="10" style="padding:0">' +
-          '<table class="model-subtable" style="width:100%">' + modelStatsRow(a) + '</table></td></tr>' : '');
+        '<tr id="modelRow-' + a.accountId + '" style="display:none"><td colspan="10" style="padding:0">' +
+          '<table class="model-subtable" style="width:100%">' + modelStatsRow(a) + '</table></td></tr>';
     }).join('');
     cards.innerHTML = list.map(a => {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString(LC()) : t('从未使用');
-      const hasModelData = (a.modelStats && Object.keys(a.modelStats).length) || (a.modelCooldowns && Object.keys(a.modelCooldowns).length);
       const cardStatus = a.status === 'cooldown' && a.cooldownUntil
         ? '<span class="status cooldown status-cooldown" title="' + t('冷却 · 剩余 ') + formatCooldown(a.cooldownUntil) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(a.cooldownUntil) + '</span></span>'
         : '<span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span>';
       // 卡片内的模型统计（免费模型 + 冷却状态）
-      let modelHtml = '';
-      if (hasModelData) {
-        const stats = Object.values(a.modelStats || {}).sort((x, y) => y.totalTokens - x.totalTokens);
-        const cools = a.modelCooldowns || {};
-        const coolingCount = Object.keys(cools).length;
-        let items = '';
-        stats.forEach(st => {
-          const cd = cools[st.modelId];
-          items += '<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--border2);font-size:12px">' +
-            '<span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(st.modelId) +
-              (cd ? ' <span style="color:var(--yellow)">⏳' + formatCooldown(cd) + '</span>' : '') + '</span>' +
-            '<span style="white-space:nowrap">' + formatTokenCount(st.totalTokens) + ' tok · ' + formatNumber(st.usageCount) + ' req</span></div>';
-        });
-        Object.keys(cools).filter(m => !(a.modelStats || {})[m]).forEach(m => {
-          items += '<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--border2);font-size:12px">' +
-            '<span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(m) + '</span>' +
-            '<span style="color:var(--yellow);white-space:nowrap">⏳' + formatCooldown(cools[m]) + '</span></div>';
-        });
-        modelHtml = '<div style="margin:10px 0 0;padding:10px;border-radius:8px;background:var(--surface);border:1px solid var(--border2)">' +
-          '<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:4px">' + t('按模型统计（仅免费模型）') +
-            (coolingCount ? ' · <span style="color:var(--yellow)">⏳ ' + coolingCount + '</span>' : '') + '</div>' + items + '</div>';
-      }
+      const stats = Object.values(a.modelStats || {}).sort((x, y) => y.totalTokens - x.totalTokens);
+      const cools = a.modelCooldowns || {};
+      const coolingCount = Object.keys(cools).length;
+      let items = '';
+      stats.forEach(st => {
+        const cd = cools[st.modelId];
+        items += '<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--border2);font-size:12px">' +
+          '<span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(st.modelId) +
+            (cd ? ' <span style="color:var(--yellow)">⏳' + formatCooldown(cd) + '</span>' : '') + '</span>' +
+          '<span style="white-space:nowrap">' + formatTokenCount(st.totalTokens) + ' tok · ' + formatNumber(st.usageCount) + ' req</span></div>';
+      });
+      Object.keys(cools).filter(m => !(a.modelStats || {})[m]).forEach(m => {
+        items += '<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--border2);font-size:12px">' +
+          '<span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(m) + '</span>' +
+          '<span style="color:var(--yellow);white-space:nowrap">⏳' + formatCooldown(cools[m]) + '</span></div>';
+      });
+      if (!items) items = '<div style="font-size:12px;color:var(--text3);padding:4px 0">' + t('暂无数据') + '</div>';
+      const modelHtml = '<div style="margin:10px 0 0;padding:10px;border-radius:8px;background:var(--surface);border:1px solid var(--border2)">' +
+        '<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:4px">' + t('按模型统计（仅免费模型）') +
+          (coolingCount ? ' · <span style="color:var(--yellow)">⏳ ' + coolingCount + '</span>' : '') + '</div>' + items + '</div>';
       return '<article class="account-card">' +
         '<div class="account-card-header"><span class="account-email">' + esc(a.email) + '</span>' +
         cardStatus + '</div>' +
@@ -1814,7 +1829,7 @@ async function loadRequestLogs(reset) {
     }
 
     const renderRow = l => {
-      const t = l.startedAt ? new Date(l.startedAt).toLocaleString(LC()) : '-';
+      const ts = l.startedAt ? new Date(l.startedAt).toLocaleString(LC()) : '-';
       const st = l.completed
         ? '<span class="log-status ok">' + t('完成') + '</span>'
         : '<span class="log-status fail" title="' + esc(l.error || '') + '">' + t('失败') + '</span>';
@@ -1822,7 +1837,7 @@ async function loadRequestLogs(reset) {
         ? formatTokenCount(l.inputTokens) + '</td><td>' + formatTokenCount(l.outputTokens) + '</td><td>' + formatTokenCount(l.cachedTokens) + '</td><td>' + formatTokenCount(l.totalTokens)
         : '-</td><td>-</td><td>-</td><td>-';
       return '<tr>' +
-        '<td class="mono" style="font-size:11px">' + t + '</td>' +
+        '<td class="mono" style="font-size:11px">' + ts + '</td>' +
         '<td>' + esc(l.accountEmail || '-') + '</td>' +
         '<td>' + esc(l.protocol || '-') + '</td>' +
         '<td class="mono" style="font-size:11px">' + esc(l.model || '-') + '</td>' +
@@ -1833,10 +1848,10 @@ async function loadRequestLogs(reset) {
         '<td>' + st + '</td></tr>';
     };
     const renderCard = l => {
-      const t = l.startedAt ? new Date(l.startedAt).toLocaleString(LC()) : '-';
+      const ts = l.startedAt ? new Date(l.startedAt).toLocaleString(LC()) : '-';
       const st = l.completed ? t('完成') : t('失败');
       const tk = l.usageAvailable
-        ? '输入 ' + formatTokenCount(l.inputTokens) + t(' · 输出 ') + formatTokenCount(l.outputTokens) + ' · 缓存 ' + formatTokenCount(l.cachedTokens) + ' · 总 ' + formatTokenCount(l.totalTokens)
+        ? t('输入 ') + formatTokenCount(l.inputTokens) + t(' · 输出 ') + formatTokenCount(l.outputTokens) + t(' · 缓存 ') + formatTokenCount(l.cachedTokens) + t(' · 总 ') + formatTokenCount(l.totalTokens)
         : t('Token 未知');
       return '<article class="account-card">' +
         '<div class="account-card-header"><span class="account-email">' + esc(l.accountEmail || '-') + '</span><span class="log-status ' + (l.completed ? 'ok' : 'fail') + '">' + st + '</span></div>' +
@@ -1847,7 +1862,7 @@ async function loadRequestLogs(reset) {
           '<div class="account-metric"><span class="account-metric-label">tok/s</span><span class="account-metric-value">' + formatTPS(l.outputTokensPerSecond) + '</span></div>' +
         '</div>' +
         '<div style="font-size:12px;color:var(--text2);margin-bottom:8px">' + tk + '</div>' +
-        '<div class="account-card-footer"><span class="mono" style="font-size:11px">' + t + '</span><span class="mono" style="font-size:11px">' + esc(l.model || '-') + '</span></div>' +
+        '<div class="account-card-footer"><span class="mono" style="font-size:11px">' + ts + '</span><span class="mono" style="font-size:11px">' + esc(l.model || '-') + '</span></div>' +
       '</article>';
     };
 
@@ -1862,6 +1877,7 @@ async function loadRequestLogs(reset) {
 }
 
 // ========== 初始化 ==========
+applyLang();
 loadStats();
 loadAccounts();
 loadKeys();
