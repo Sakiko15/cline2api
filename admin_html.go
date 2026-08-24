@@ -974,7 +974,15 @@ const I18N = {
   '模型无变化': 'No model changes',
   '模型列表已更新': 'Model list updated',
   '同步中...': 'Syncing...',
-  '暂无模型': 'No models'
+  '暂无模型': 'No models',
+  '模型统计': 'Model Usage',
+  '按模型统计（仅免费模型）': 'Per-model usage (free models)',
+  '免费模型': 'Free models',
+  '展开': 'Expand',
+  '收起': 'Collapse',
+  '模型冷却中': 'Model cooling',
+  '模型冷却中，约 ': 'Model cooling, ~',
+  '后释放': ' until release',
 };
 let LANG = 'zh';
 const LC = () => LANG === 'en' ? 'en-US' : 'zh-CN';
@@ -1165,12 +1173,52 @@ async function loadAccounts() {
       return;
     }
     const sn = { active: t('活跃'), cooldown: t('冷却'), expired: t('已过期') };
+    // 模型统计子行（仅 free 模型 + 模型级冷却状态）
+    const modelStatsRow = a => {
+      const stats = Object.values(a.modelStats || {}).sort((x, y) => y.totalTokens - x.totalTokens);
+      const cools = a.modelCooldowns || {};
+      const rows = stats.map(st => {
+        const cd = cools[st.modelId];
+        const cdBadge = cd
+          ? '<span class="status cooldown status-cooldown" title="' + t('模型冷却中') + ' · ' + formatCooldown(cd) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(cd) + '</span></span>'
+          : '';
+        return '<tr style="background:var(--surface2)">' +
+          '<td style="padding-left:32px" class="mono">' + esc(st.modelId) + ' <span class="model-tag free" style="font-size:10px;padding:1px 6px">free</span>' + '</td>' +
+          '<td>' + cdBadge + '</td>' +
+          '<td>' + formatNumber(st.usageCount) + '</td>' +
+          '<td>' + formatTokenCount(st.promptTokens) + '</td>' +
+          '<td>' + formatTokenCount(st.completionTokens) + '</td>' +
+          '<td>' + formatTokenCount(st.totalTokens) + '</td>' +
+          '<td>' + formatTokenCount(st.cachedTokens) + '</td>' +
+          '<td></td><td></td><td></td>' +
+          '</tr>';
+      }).join('');
+      const coolsWithoutStats = Object.keys(cools).filter(m => cools[m] && !(a.modelStats || {})[m]);
+      const extraCools = coolsWithoutStats.map(m =>
+        '<tr style="background:var(--surface2)">' +
+          '<td style="padding-left:32px" class="mono">' + esc(m) + '</td>' +
+          '<td><span class="status cooldown status-cooldown" title="' + t('模型冷却中') + ' · ' + formatCooldown(cools[m]) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(cools[m]) + '</span></span></td>' +
+          '<td colspan="8"></td>' +
+        '</tr>'
+      ).join('');
+      const totalCooling = Object.keys(cools).length;
+      if (!rows && !extraCools) return '';
+      const title = '<tr style="background:var(--surface2)">' +
+        '<td colspan="10" style="padding:8px 32px;color:var(--text2);font-size:12px;font-weight:600">' +
+          t('按模型统计（仅免费模型）') + (totalCooling ? ' · <span style="color:var(--yellow)">⏳ ' + totalCooling + ' ' + t('模型冷却中') + '</span>' : '') +
+        '</td></tr>';
+      return title + rows + extraCools;
+    };
     tbody.innerHTML = list.map(a => {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString(LC()) : '-';
       const cr = a.createdAt ? new Date(a.createdAt).toLocaleString(LC()) : '-';
+      const hasModelData = (a.modelStats && Object.keys(a.modelStats).length) || (a.modelCooldowns && Object.keys(a.modelCooldowns).length);
       const statusBadge = a.status === 'cooldown' && a.cooldownUntil
         ? '<span class="status cooldown status-cooldown" title="' + t('冷却 · 剩余 ') + formatCooldown(a.cooldownUntil) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(a.cooldownUntil) + '</span></span>'
         : '<span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span>';
+      const expander = hasModelData
+        ? '<button class="btn btn-sm btn-icon" onclick="toggleModelRow(\'' + a.accountId + '\', this)" title="' + t('展开') + '">▸</button>'
+        : '';
       return '<tr>' +
         '<td>' + esc(a.email) + '</td>' +
         '<td>' + statusBadge + '</td>' +
@@ -1181,17 +1229,43 @@ async function loadAccounts() {
         '<td>' + formatTokenCount(a.cachedTokens) + '</td>' +
         '<td class="mono" style="font-size:11px">' + lu + '</td>' +
         '<td class="mono" style="font-size:11px">' + cr + '</td>' +
-        '<td style="white-space:nowrap">' +
+        '<td style="white-space:nowrap">' + expander +
           '<button class="btn btn-sm" onclick="testAccount(\'' + a.accountId + '\',this)" title="测试">⚡</button> ' +
           '<button class="btn btn-sm" onclick="resetAccount(\'' + a.accountId + '\')" title="重置">↻</button> ' +
           '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.accountId + '\')" title="删除">✕</button>' +
-        '</td></tr>';
+        '</td></tr>' +
+        (hasModelData ? '<tr id="modelRow-' + a.accountId + '" style="display:none"><td colspan="10" style="padding:0">' +
+          '<table class="model-subtable" style="width:100%">' + modelStatsRow(a) + '</table></td></tr>' : '');
     }).join('');
     cards.innerHTML = list.map(a => {
       const lu = a.lastUsed ? new Date(a.lastUsed).toLocaleString(LC()) : t('从未使用');
+      const hasModelData = (a.modelStats && Object.keys(a.modelStats).length) || (a.modelCooldowns && Object.keys(a.modelCooldowns).length);
       const cardStatus = a.status === 'cooldown' && a.cooldownUntil
         ? '<span class="status cooldown status-cooldown" title="' + t('冷却 · 剩余 ') + formatCooldown(a.cooldownUntil) + '"><span class="cd-icon">⏳</span><span class="cd-time">' + formatCooldown(a.cooldownUntil) + '</span></span>'
         : '<span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span>';
+      // 卡片内的模型统计（免费模型 + 冷却状态）
+      let modelHtml = '';
+      if (hasModelData) {
+        const stats = Object.values(a.modelStats || {}).sort((x, y) => y.totalTokens - x.totalTokens);
+        const cools = a.modelCooldowns || {};
+        const coolingCount = Object.keys(cools).length;
+        let items = '';
+        stats.forEach(st => {
+          const cd = cools[st.modelId];
+          items += '<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--border2);font-size:12px">' +
+            '<span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(st.modelId) +
+              (cd ? ' <span style="color:var(--yellow)">⏳' + formatCooldown(cd) + '</span>' : '') + '</span>' +
+            '<span style="white-space:nowrap">' + formatTokenCount(st.totalTokens) + ' tok · ' + formatNumber(st.usageCount) + ' req</span></div>';
+        });
+        Object.keys(cools).filter(m => !(a.modelStats || {})[m]).forEach(m => {
+          items += '<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid var(--border2);font-size:12px">' +
+            '<span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(m) + '</span>' +
+            '<span style="color:var(--yellow);white-space:nowrap">⏳' + formatCooldown(cools[m]) + '</span></div>';
+        });
+        modelHtml = '<div style="margin:10px 0 0;padding:10px;border-radius:8px;background:var(--surface);border:1px solid var(--border2)">' +
+          '<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:4px">' + t('按模型统计（仅免费模型）') +
+            (coolingCount ? ' · <span style="color:var(--yellow)">⏳ ' + coolingCount + '</span>' : '') + '</div>' + items + '</div>';
+      }
       return '<article class="account-card">' +
         '<div class="account-card-header"><span class="account-email">' + esc(a.email) + '</span>' +
         cardStatus + '</div>' +
@@ -1201,7 +1275,7 @@ async function loadAccounts() {
           '<div class="account-metric"><span class="account-metric-label">' + t('缓存') + '</span><span class="account-metric-value">' + formatTokenCount(a.cachedTokens) + '</span></div>' +
           '<div class="account-metric"><span class="account-metric-label">' + t('输入') + '</span><span class="account-metric-value">' + formatTokenCount(a.promptTokens) + '</span></div>' +
           '<div class="account-metric"><span class="account-metric-label">' + t('输出') + '</span><span class="account-metric-value">' + formatTokenCount(a.completionTokens) + '</span></div>' +
-        '</div>' +
+        '</div>' + modelHtml +
         '<div class="account-card-footer"><span>' + t('最后使用：') + lu + '</span><span class="account-card-actions">' +
           '<button class="btn btn-sm" onclick="testAccount(\'' + a.accountId + '\',this)" title="测试">⚡</button>' +
           '<button class="btn btn-sm" onclick="resetAccount(\'' + a.accountId + '\')" title="重置">↻</button>' +
@@ -1209,6 +1283,16 @@ async function loadAccounts() {
         '</span></div></article>';
     }).join('');
   } catch (e) { toast(t('加载账号失败: ') + e.message, 'error'); }
+}
+
+// 展开/收起账号的模型统计子行（表格视图）
+function toggleModelRow(id, btn) {
+  const row = _('modelRow-' + id);
+  if (!row) return;
+  const hidden = row.style.display === 'none';
+  row.style.display = hidden ? '' : 'none';
+  btn.innerHTML = hidden ? '▾' : '▸';
+  btn.title = hidden ? t('收起') : t('展开');
 }
 
 async function testAccount(id, btn) {

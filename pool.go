@@ -151,6 +151,20 @@ func pickAccount() *Account {
 	p := loadPool()
 	poolMu.Lock()
 	defer poolMu.Unlock()
+	return pickAccountLocked(p)
+}
+
+// pickAccountForModel 按轮询/策略挑选一个「该模型未处于模型级冷却」的账号；
+// 所有 active 账号对该模型都冷却时回退到普通 pickAccount（请求会得到模型级 429 提示）。
+// 空模型名等同于 pickAccount。
+func pickAccountForModel(model string) *Account {
+	if model == "" {
+		return pickAccount()
+	}
+
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
 
 	active := make([]*Account, 0)
 	for _, a := range p.Accounts {
@@ -158,30 +172,72 @@ func pickAccount() *Account {
 			active = append(active, a)
 		}
 	}
-
 	if len(active) == 0 {
 		return nil
 	}
 
-	cfg := getProxyConfig()
+	// 该模型未冷却的账号列表
+	eligible := make([]*Account, 0, len(active))
+	for _, a := range active {
+		until, cool := a.ModelCooldowns[model]
+		if !cool || time.Now().After(until) {
+			if cool {
+				delete(a.ModelCooldowns, model)
+			}
+			eligible = append(eligible, a)
+		}
+	}
 
+	if len(eligible) == 0 {
+		// 全部冷却 → 回退普通轮询，请求会带出模型级错误
+		return pickAccountLocked(p)
+	}
+
+	cfg := getProxyConfig()
 	var acc *Account
 	switch cfg.Strategy {
 	case "fill":
-		// Always pick the first available (fill)
+		acc = eligible[0]
+	case "random":
+		n := time.Now().UnixNano() % int64(len(eligible))
+		acc = eligible[n]
+	default: // round_robin
+		if p.CurrentIdx >= len(eligible) {
+			p.CurrentIdx = 0
+		}
+		acc = eligible[p.CurrentIdx]
+		p.CurrentIdx = (p.CurrentIdx + 1) % len(eligible)
+	}
+	savePool()
+	return acc
+}
+
+// pickAccountLocked 在已持有 poolMu 的前提下执行普通轮询挑选（供 pickAccountForModel 回退用）。
+func pickAccountLocked(p *AccountPool) *Account {
+	active := make([]*Account, 0)
+	for _, a := range p.Accounts {
+		if a.Status == "active" {
+			active = append(active, a)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	cfg := getProxyConfig()
+	var acc *Account
+	switch cfg.Strategy {
+	case "fill":
 		acc = active[0]
 	case "random":
-		// Random selection
 		n := time.Now().UnixNano() % int64(len(active))
 		acc = active[n]
-	default: // round_robin
+	default:
 		if p.CurrentIdx >= len(active) {
 			p.CurrentIdx = 0
 		}
 		acc = active[p.CurrentIdx]
 		p.CurrentIdx = (p.CurrentIdx + 1) % len(active)
 	}
-
 	savePool()
 	return acc
 }
@@ -206,7 +262,7 @@ func listAccounts() []*Account {
 	result := make([]*Account, len(p.Accounts))
 	for i, a := range p.Accounts {
 		// Don't expose tokens
-		result[i] = &Account{
+		cp := &Account{
 			AccountID:        a.AccountID,
 			Email:            a.Email,
 			Status:           a.Status,
@@ -219,6 +275,22 @@ func listAccounts() []*Account {
 			CachedTokens:     a.CachedTokens,
 			CreatedAt:        a.CreatedAt,
 		}
+		// 按模型细分统计（脱敏拷贝）
+		if len(a.ModelStats) > 0 {
+			cp.ModelStats = make(map[string]*ModelStat, len(a.ModelStats))
+			for mid, st := range a.ModelStats {
+				sc := *st
+				cp.ModelStats[mid] = &sc
+			}
+		}
+		// 模型级冷却（脱敏拷贝）
+		if len(a.ModelCooldowns) > 0 {
+			cp.ModelCooldowns = make(map[string]time.Time, len(a.ModelCooldowns))
+			for mid, until := range a.ModelCooldowns {
+				cp.ModelCooldowns[mid] = until
+			}
+		}
+		result[i] = cp
 	}
 	return result
 }

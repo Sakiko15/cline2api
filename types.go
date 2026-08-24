@@ -17,6 +17,10 @@ type Account struct {
 	TotalTokens      int64     `json:"totalTokens"`
 	CachedTokens     int64     `json:"cachedTokens"`
 	CreatedAt        time.Time `json:"createdAt"`
+	// ModelStats 按模型细分的用量统计（仅记录 free 模型）
+	ModelStats map[string]*ModelStat `json:"modelStats,omitempty"`
+	// ModelCooldowns 模型级冷却：modelID → 恢复时间（429 时记录，只暂停该模型）
+	ModelCooldowns map[string]time.Time `json:"modelCooldowns,omitempty"`
 }
 
 type Model struct {
@@ -27,6 +31,17 @@ type Model struct {
 	Custom   bool   `json:"custom"` // true=用户手动添加，可删除
 	// Source 标记模型来源："remote"=从 Cline 官方接口同步，空=内置/用户自定义
 	Source string `json:"source,omitempty"`
+}
+
+// ModelStat 是单个模型在某账号下的用量统计（仅统计 free 模型）。
+type ModelStat struct {
+	ModelID          string `json:"modelId"`
+	Cost             string `json:"cost"`
+	UsageCount       int64  `json:"usageCount"`
+	PromptTokens     int64  `json:"promptTokens"`
+	CompletionTokens int64  `json:"completionTokens"`
+	TotalTokens      int64  `json:"totalTokens"`
+	CachedTokens     int64  `json:"cachedTokens"`
 }
 
 type AccountPool struct {

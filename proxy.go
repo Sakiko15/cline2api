@@ -533,7 +533,8 @@ func clineHeaders(token, sessionID string) http.Header {
 }
 
 func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
-	acc := pickAccount()
+	model, _ := params["model"].(string)
+	acc := pickAccountForModel(model)
 	if acc == nil {
 		return nil, nil, fmt.Errorf("no active accounts available. Use --login or admin API to add accounts")
 	}
@@ -605,11 +606,17 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		bodyStr := string(bodyBytes)
-		// Mark account on cooldown on rate limits
+		// 429：模型级冷却 —— 只暂停该模型，账号保持可用，其他模型继续转发
 		if resp.StatusCode == 429 {
-			acc.Status = "cooldown"
-			acc.CooldownUntil = parseCooldownUntil(bodyStr)
-			savePool()
+			model, _ := body["model"].(string)
+			until := parseCooldownUntil(bodyStr)
+			if model != "" {
+				setModelCooldown(acc, model, until)
+			} else {
+				acc.Status = "cooldown"
+				acc.CooldownUntil = until
+				savePool()
+			}
 		}
 		return nil, acc, fmt.Errorf("API %d: %s", resp.StatusCode, truncate(bodyStr, 500))
 	}
@@ -844,17 +851,81 @@ func mergeTokenUsage(current, next tokenUsage) tokenUsage {
 	return current
 }
 
-func recordTokenUsage(acc *Account, usage tokenUsage) {
+func recordTokenUsage(acc *Account, model string, usage tokenUsage) {
 	if acc == nil || !usage.Valid {
 		return
 	}
+	// 先判断是否免费模型（getAllModels 会拿 poolMu，必须在持有锁之前计算）
+	isFree := model != "" && isFreeModelID(model)
 	poolMu.Lock()
 	acc.PromptTokens += usage.Prompt
 	acc.CompletionTokens += usage.Completion
 	acc.TotalTokens += usage.Total
 	acc.CachedTokens += usage.Cached
+	// 按模型细分统计（仅记录 free 模型）
+	if isFree {
+		if acc.ModelStats == nil {
+			acc.ModelStats = make(map[string]*ModelStat)
+		}
+		st := acc.ModelStats[model]
+		if st == nil {
+			st = &ModelStat{ModelID: model, Cost: "free"}
+			acc.ModelStats[model] = st
+		}
+		st.UsageCount++
+		st.PromptTokens += usage.Prompt
+		st.CompletionTokens += usage.Completion
+		st.TotalTokens += usage.Total
+		st.CachedTokens += usage.Cached
+	}
 	poolMu.Unlock()
 	savePool()
+}
+
+// isFreeModelID 判断模型是否为 free 计费（用于按模型统计和模型级冷却）。
+func isFreeModelID(model string) bool {
+	for _, m := range getAllModels() {
+		if m.ID == model {
+			return m.Cost == "free"
+		}
+	}
+	// 未知模型：按 ID 后缀/前缀启发式判断
+	return strings.HasSuffix(model, ":free") || strings.Contains(model, "/free/")
+}
+
+// modelCooldownActive 判断某账号下该模型是否处于模型级冷却中。
+func modelCooldownActive(acc *Account, model string) bool {
+	if acc == nil || model == "" {
+		return false
+	}
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	until, ok := acc.ModelCooldowns[model]
+	if !ok {
+		return false
+	}
+	if time.Now().After(until) {
+		delete(acc.ModelCooldowns, model)
+		savePool()
+		return false
+	}
+	return true
+}
+
+// setModelCooldown 记录模型级冷却（429 时调用）：只暂停该模型，账号保持可用。
+// fallback 为解析失败时的恢复时长（默认 1 小时）。
+func setModelCooldown(acc *Account, model string, until time.Time) {
+	if acc == nil || model == "" {
+		return
+	}
+	poolMu.Lock()
+	if acc.ModelCooldowns == nil {
+		acc.ModelCooldowns = make(map[string]time.Time)
+	}
+	acc.ModelCooldowns[model] = until
+	poolMu.Unlock()
+	savePool()
+	log.Printf("model cooldown: account=%s model=%s until=%s", truncateEmail(acc.Email), model, until.Format("15:04:05"))
 }
 
 func truncateEmail(email string) string {
@@ -956,7 +1027,7 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 		w.Write([]byte(line + "\n"))
 		flusher.Flush()
 	}
-	recordTokenUsage(acc, latestUsage)
+	recordTokenUsage(acc, reqLog.Model, latestUsage)
 	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
 }
 
@@ -1008,7 +1079,7 @@ func handleNonStreamResponse(w http.ResponseWriter, upstream *http.Response, acc
 
 	out = normalizeOpenAIResponse(out)
 	usage := parseTokenUsage(out["usage"])
-	recordTokenUsage(acc, usage)
+	recordTokenUsage(acc, reqLog.Model, usage)
 	finalizeRequestLog(reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 
 	if msg, ok := getNested(out, "choices", 0, "message").(map[string]any); ok {
@@ -1391,7 +1462,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		out = normalizeOpenAIResponse(out)
 		usage := parseTokenUsage(out["usage"])
-		recordTokenUsage(acc, usage)
+		recordTokenUsage(acc, reqLog.Model, usage)
 		finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
 		anthropicResp := openAIToAnthropic(out)
 
@@ -1614,7 +1685,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			"output_tokens": latestUsage.Completion,
 		},
 	})
-	recordTokenUsage(acc, latestUsage)
+	recordTokenUsage(acc, reqLog.Model, latestUsage)
 	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
 
 	emit("message_stop", map[string]any{"type": "message_stop"})
