@@ -8,13 +8,15 @@ Cline API 反向代理 · 多账号轮询 · 双协议兼容 · 桌面端
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)](#构建)
 
+**🌐 English: [English README](README.en.md)**
+
 </div>
 
 ---
 
 ## 简介
 
-Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI 和 Anthropic Messages API 双协议、API Key 鉴权，内置中文管理后台。提供跨平台桌面端单文件应用（Windows / macOS / Linux），双击即用。
+Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI 和 Anthropic Messages API 双协议、API Key 鉴权，内置中英文管理后台（自动跟随浏览器语言，可手动切换）。提供跨平台桌面端单文件应用（Windows / macOS / Linux），双击即用。
 
 **开发语言**：Go（后端 + 代理 + 桌面壳），HTML/CSS/JS（管理后台前端，内嵌于二进制）。
 
@@ -22,8 +24,9 @@ Cline2API 是 Cline API 的反向代理服务，支持多账号轮询、OpenAI �
 
 - **双协议兼容**：同时支持 `/v1/chat/completions`（OpenAI）和 `/v1/messages`（Anthropic Messages API）
 - **多账号轮询**：自动在多个 Cline 账号间切换负载（`round_robin` / `fill` / `random` 策略）
-- **中文管理后台**：浏览器访问 `/admin/` 管理账号、API Key、模型配置、请求头、代理设置
-- **自定义模型**：内置模型之外，可在后台手动添加/删除模型 ID，并自由选择默认模型
+- **中英文管理后台**：浏览器访问 `/admin/` 管理账号、API Key、模型配置、请求头、代理设置；自动跟随浏览器语言，侧栏可手动切换
+- **动态模型同步**：启动时自动拉取 Cline 官方推荐模型接口（免费/订阅模型），模型变化时弹窗提示，也可在后台手动「从 Cline 同步模型」
+- **自定义模型**：后台可手动添加/删除模型 ID，并自由选择默认模型（未设置时自动回退到第一个免费模型）
 - **API Key 鉴权**：保护代理端点，支持生成/删除多个 API Key
 - **System Prompt 覆盖**：项目目录下放 `override.md` 则自动替换系统提示词
 - **账号导入/导出**：支持 OAuth 登录、手动 Token、批量文件导入，以及跨设备导出
@@ -174,19 +177,15 @@ git push origin v1.0.0
 
 ## 可用模型
 
-内置 6 个模型，也可在后台手动添加自定义模型 ID：
+**默认动态同步**：程序启动时会自动从 Cline 官方推荐模型接口拉取最新模型（免费 / cline-pass / 推荐模型），
+模型列表变化时管理后台会弹窗提示，也可在「设置 → 可用模型」点击「从 Cline 同步模型」手动刷新。
 
-| 模型 ID | 计费 |
-|---------|------|
-| `cline-free/glm-5.2` | ✅ 免费，不消耗额度 |
-| `cline-pass/glm-5.2` | ❌ 需要 cline-pass 订阅 |
-| `cline-pass/deepseek-v4-flash` | ❌ 需要 cline-pass 订阅 |
-| `cline-pass/qwen3.7-max` | ❌ 需要 cline-pass 订阅 |
-| `deepseek/deepseek-v4-flash` | ✅ 免费（官方 v4-flash 0731 通道）|
-| `poolside/laguna-s-2.1:free` | ✅ 免费（`:free` 后缀）|
+- 同步成功后，后台模型列表以**远程模型**为主（内置硬编码模型仅作为离线 fallback）
+- 远程模型直接可用；后台「可用模型」区可添加/删除**自定义模型**（带 ✕ 删除按钮的是自定义项）
+- 默认模型可在「代理配置 → 默认模型」下拉中设置；未设置时自动回退到第一个免费模型
 
-后台「可用模型」区可添加/删除自定义模型（带 ✕ 删除按钮的是自定义项），
-并在「代理配置 → 默认模型」下拉中设置默认模型。
+> 内置 fallback 模型（离线/同步失败时兜底）：
+> `cline-free/glm-5.2`、`cline-pass/glm-5.2`、`cline-pass/deepseek-v4-flash`、`cline-pass/qwen3.7-max`、`deepseek/deepseek-v4-flash`、`poolside/laguna-s-2.1:free`
 
 ## 项目结构
 

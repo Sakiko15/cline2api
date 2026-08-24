@@ -24,7 +24,8 @@ const (
 	fallbackDefaultModel   = "cline-free/glm-5.2"
 )
 
-// builtinModels 是内置默认模型列表（不可删除）。用户自定义模型从 AccountPool 加载。
+// builtinModels 是内置默认模型列表（不可删除），仅作为离线 / 未同步时的 fallback。
+// 同步 Cline 官方推荐模型成功后，getAllModels 以远程模型为主。
 var builtinModels = []Model{
 	{ID: "cline-free/glm-5.2", Provider: "zai", Cost: "free", Status: "active", Custom: false},
 	{ID: "cline-pass/glm-5.2", Provider: "zai", Cost: "pass", Status: "active", Custom: false},
@@ -34,19 +35,39 @@ var builtinModels = []Model{
 	{ID: "poolside/laguna-s-2.1:free", Provider: "poolside", Cost: "free", Status: "active", Custom: false},
 }
 
-// getAllModels 返回内置模型 + 用户自定义模型的合并列表。
+// getAllModels 返回可用模型列表：
+//   - 已同步远程模型：远程（Source=remote）+ 用户自定义
+//   - 未同步 / 离线：内置 fallback + 用户自定义
 func getAllModels() []Model {
 	p := loadPool()
 	poolMu.Lock()
 	defer poolMu.Unlock()
 
-	result := make([]Model, 0, len(builtinModels)+len(p.Models))
+	var custom []Model
+	var remote []Model
+	for _, m := range p.Models {
+		if m.Source == "remote" {
+			remote = append(remote, m)
+		} else {
+			custom = append(custom, m)
+		}
+	}
+
+	if len(remote) > 0 {
+		result := make([]Model, 0, len(remote)+len(custom))
+		result = append(result, remote...)
+		result = append(result, custom...)
+		return result
+	}
+
+	result := make([]Model, 0, len(builtinModels)+len(custom))
 	result = append(result, builtinModels...)
-	result = append(result, p.Models...)
+	result = append(result, custom...)
 	return result
 }
 
-// getDefaultModel 返回用户设置的默认模型，若未设置则回退到 fallbackDefaultModel。
+// getDefaultModel 返回用户设置的默认模型；未设置时优先回退到第一个远程 free 模型，
+// 否则用内置 fallback。
 func getDefaultModel() string {
 	p := loadPool()
 	poolMu.Lock()
@@ -54,6 +75,18 @@ func getDefaultModel() string {
 
 	if p.DefaultModel != "" {
 		return p.DefaultModel
+	}
+
+	for _, m := range p.Models {
+		if m.Source == "remote" && m.Cost == "free" {
+			return m.ID
+		}
+	}
+
+	for _, m := range builtinModels {
+		if m.Cost == "free" {
+			return m.ID
+		}
 	}
 	return fallbackDefaultModel
 }
@@ -187,6 +220,9 @@ func startProxy(host string, port int) error {
 		}
 	}
 	log.Printf("Loaded %d active accounts from pool", activeCount)
+
+	// 启动时异步同步一次 Cline 官方推荐模型（不阻塞启动）
+	startModelSync()
 
 	freePort(port)
 

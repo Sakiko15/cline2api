@@ -81,6 +81,7 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/keys/generate", auth(handleAdminGenerateKey))
 	mux.HandleFunc("/admin/api/keys/delete", auth(handleAdminDeleteKey))
 	mux.HandleFunc("/admin/api/models", auth(handleAdminModels))
+	mux.HandleFunc("/admin/api/models/sync", auth(handleAdminModelSync))
 	mux.HandleFunc("/admin/api/models/add", auth(handleAdminModelAdd))
 	mux.HandleFunc("/admin/api/models/delete", auth(handleAdminModelDelete))
 	mux.HandleFunc("/admin/api/config", auth(handleAdminConfig))
@@ -97,11 +98,11 @@ func requireAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
-		c, err := r.Cookie(adminSessionCookie)
-		if err != nil {
-			writeAPI(w, http.StatusUnauthorized, apiResponse{Error: "需要登录"})
-			return
-		}
+			c, err := r.Cookie(adminSessionCookie)
+			if err != nil {
+				writeAPI(w, http.StatusUnauthorized, apiResponse{Error: tAPI(r, "login_required")})
+				return
+			}
 		adminSessionsMu.Lock()
 		expiry, ok := adminSessions[c.Value]
 		if ok {
@@ -112,8 +113,8 @@ func requireAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			}
 			delete(adminSessions, c.Value)
 		}
-		adminSessionsMu.Unlock()
-		writeAPI(w, http.StatusUnauthorized, apiResponse{Error: "登录已过期，请重新登录"})
+			adminSessionsMu.Unlock()
+			writeAPI(w, http.StatusUnauthorized, apiResponse{Error: tAPI(r, "session_expired")})
 	}
 }
 
@@ -167,32 +168,32 @@ func randomHex(n int) string {
 
 // POST /admin/api/login  body: {password}
 func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
-		return
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
-		return
-	}
-	defer r.Body.Close()
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
-		return
-	}
-	if loadPool().AdminPasswordHash == "" {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "后台未启用密码"})
-		return
-	}
-	if !verifyAdminPassword(req.Password) {
-		time.Sleep(500 * time.Millisecond) // 防爆破
-		writeAPI(w, http.StatusUnauthorized, apiResponse{Error: "密码错误"})
-		return
-	}
+		if r.Method != "POST" {
+			writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+			return
+		}
+		defer r.Body.Close()
+		var req struct {
+			Password string `json:"password"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+			return
+		}
+		if loadPool().AdminPasswordHash == "" {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "password_not_enabled")})
+			return
+		}
+		if !verifyAdminPassword(req.Password) {
+			time.Sleep(500 * time.Millisecond) // 防爆破
+			writeAPI(w, http.StatusUnauthorized, apiResponse{Error: tAPI(r, "wrong_password")})
+			return
+		}
 	token := randomHex(32)
 	adminSessionsMu.Lock()
 	adminSessions[token] = time.Now().Add(adminSessionTTL)
@@ -205,45 +206,45 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(adminSessionTTL.Seconds()),
 	})
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "登录成功"})
-}
-
-// POST /admin/api/logout
-func handleAdminLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(adminSessionCookie); err == nil {
-		adminSessionsMu.Lock()
-		delete(adminSessions, c.Value)
-		adminSessionsMu.Unlock()
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "login_ok")})
 	}
-	http.SetCookie(w, &http.Cookie{Name: adminSessionCookie, Value: "", Path: "/admin", MaxAge: -1})
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "已退出登录"})
-}
+
+	// POST /admin/api/logout
+	func handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie(adminSessionCookie); err == nil {
+			adminSessionsMu.Lock()
+			delete(adminSessions, c.Value)
+			adminSessionsMu.Unlock()
+		}
+		http.SetCookie(w, &http.Cookie{Name: adminSessionCookie, Value: "", Path: "/admin", MaxAge: -1})
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "logout_ok")})
+	}
 
 // POST /admin/api/password  body: {password}（空 = 清除密码，恢复无密码访问）
 func handleAdminPassword(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
-		return
-	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
-		return
-	}
-	defer r.Body.Close()
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
-		return
-	}
-	setAdminPassword(req.Password)
-	if req.Password == "" {
-		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "已清除后台密码"})
-	} else {
-		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "后台密码已更新"})
-	}
+		if r.Method != "POST" {
+			writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+			return
+		}
+		defer r.Body.Close()
+		var req struct {
+			Password string `json:"password"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+			return
+		}
+		setAdminPassword(req.Password)
+		if req.Password == "" {
+			writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "password_cleared")})
+		} else {
+			writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "password_updated")})
+		}
 }
 
 func adminStaticHandler(w http.ResponseWriter, r *http.Request) {
@@ -259,7 +260,7 @@ func adminStaticHandler(w http.ResponseWriter, r *http.Request) {
 // GET /admin/api/accounts
 func handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	accounts := listAccounts()
@@ -276,7 +277,7 @@ func handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 // POST /admin/api/accounts/add  body: { refreshToken, email }
 func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -291,21 +292,21 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 		Email        string `json:"email"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
 		return
 	}
 
-	if req.RefreshToken == "" {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "refreshToken is required"})
-		return
-	}
+		if req.RefreshToken == "" {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "refresh_token_required")})
+			return
+		}
 
-	// Validate by refreshing
-	resp, err := refreshClineToken(req.RefreshToken)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid refreshToken: " + err.Error()})
-		return
-	}
+		// Validate by refreshing
+		resp, err := refreshClineToken(req.RefreshToken)
+		if err != nil {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_refresh_token", err.Error())})
+			return
+		}
 
 	if req.Email == "" {
 		req.Email = fmt.Sprintf("user_%d", len(loadPool().Accounts)+1)
@@ -327,9 +328,9 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 	addAccount(acc)
 	log.Printf("Account added via API: %s", req.Email)
 
-	writeAPI(w, http.StatusOK, apiResponse{
-		Success: true,
-		Message: fmt.Sprintf("Account %s added", req.Email),
+		writeAPI(w, http.StatusOK, apiResponse{
+			Success: true,
+			Message: tAPI(r, "account_added", req.Email),
 		Data: map[string]any{
 			"accountId": acc.AccountID,
 			"email":     acc.Email,
@@ -341,7 +342,7 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 // POST /admin/api/accounts/delete  body: { accountId }
 func handleAdminAccountDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -355,26 +356,26 @@ func handleAdminAccountDelete(w http.ResponseWriter, r *http.Request) {
 		AccountID string `json:"accountId"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
 		return
 	}
 
-	if req.AccountID == "" {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "accountId is required"})
-		return
-	}
+		if req.AccountID == "" {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "account_id_required")})
+			return
+		}
 
-	if removeAccount(req.AccountID) {
-		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "Account deleted"})
-	} else {
-		writeAPI(w, http.StatusNotFound, apiResponse{Error: "Account not found"})
-	}
+		if removeAccount(req.AccountID) {
+			writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "account_deleted")})
+		} else {
+			writeAPI(w, http.StatusNotFound, apiResponse{Error: tAPI(r, "account_not_found")})
+		}
 }
 
 // POST /admin/api/oauth/start  -- Start OAuth device login, returns URL
 func handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 
@@ -470,7 +471,7 @@ func handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 func handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("sessionId")
 	if sessionID == "" {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "sessionId required"})
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "session_id_required")})
 		return
 	}
 
@@ -479,7 +480,7 @@ func handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	oauthSessionsMu.Unlock()
 
 	if !ok {
-		writeAPI(w, http.StatusNotFound, apiResponse{Error: "session not found"})
+		writeAPI(w, http.StatusNotFound, apiResponse{Error: tAPI(r, "session_not_found")})
 		return
 	}
 
@@ -500,7 +501,7 @@ func handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 // POST /admin/api/sso/import  body: { ssoCookies: string, email?: string }
 func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -515,12 +516,12 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 		Email      string `json:"email"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
 		return
 	}
 
 	if req.SSOCookies == "" {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "ssoCookies is required"})
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "sso_cookies_required")})
 		return
 	}
 
@@ -574,17 +575,17 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 		result["errors"] = errors
 	}
 
-	writeAPI(w, http.StatusOK, apiResponse{
-		Success: true,
-		Message: fmt.Sprintf("Imported %d accounts, %d failed", imported, len(errors)),
-		Data:    result,
-	})
+		writeAPI(w, http.StatusOK, apiResponse{
+			Success: true,
+			Message: tAPI(r, "imported_accounts", imported, len(errors)),
+			Data:    result,
+		})
 }
 
 // POST /admin/api/batch-import  body: { tokens: [{ refreshToken, email }] }
 func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -601,14 +602,14 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 		} `json:"tokens"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
 		return
 	}
 
-	if len(req.Tokens) == 0 {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "tokens array is empty"})
-		return
-	}
+		if len(req.Tokens) == 0 {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "tokens_empty")})
+			return
+		}
 
 	imported := 0
 	errors := []string{}
@@ -639,9 +640,9 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 		imported++
 	}
 
-	writeAPI(w, http.StatusOK, apiResponse{
-		Success: true,
-		Message: fmt.Sprintf("Imported %d accounts, %d failed", imported, len(errors)),
+		writeAPI(w, http.StatusOK, apiResponse{
+			Success: true,
+			Message: tAPI(r, "imported_accounts", imported, len(errors)),
 		Data: map[string]any{
 			"imported": imported,
 			"failed":   len(errors),
@@ -653,7 +654,7 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 // GET /admin/api/accounts/export — 导出账号为批量导入兼容格式
 func handleExportAccounts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 
@@ -683,15 +684,15 @@ func handleExportAccounts(w http.ResponseWriter, r *http.Request) {
 // GET /admin/api/open-external?url=... — 用系统默认浏览器打开外部链接
 func handleOpenExternal(w http.ResponseWriter, r *http.Request) {
 	url := r.URL.Query().Get("url")
-	if url == "" {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "url required"})
-		return
-	}
-	// 仅允许 http/https，防止任意命令执行
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "only http/https URLs allowed"})
-		return
-	}
+		if url == "" {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "url_required")})
+			return
+		}
+		// 仅允许 http/https，防止任意命令执行
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "url_http_only")})
+			return
+		}
 	if err := openBrowser(url); err != nil {
 		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: err.Error()})
 		return
@@ -702,7 +703,7 @@ func handleOpenExternal(w http.ResponseWriter, r *http.Request) {
 // POST /admin/api/accounts/refresh-all
 func handleAdminRefreshAll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	p := loadPool()
@@ -713,26 +714,26 @@ func handleAdminRefreshAll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	poolMu.Unlock()
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "All tokens refreshed"})
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "tokens_refreshed")})
 }
 
 // POST /admin/api/accounts/delete-all
 func handleAdminDeleteAll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	poolMu.Lock()
 	pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}}
 	poolMu.Unlock()
 	savePool()
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "All accounts deleted"})
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "accounts_deleted")})
 }
 
 // POST /admin/api/accounts/reset  body: { accountId }
 func handleAdminAccountReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -746,30 +747,30 @@ func handleAdminAccountReset(w http.ResponseWriter, r *http.Request) {
 		AccountID string `json:"accountId"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
 		return
 	}
 
-	acc := getAccountByID(req.AccountID)
-	if acc == nil {
-		writeAPI(w, http.StatusNotFound, apiResponse{Error: "account not found"})
-		return
-	}
+		acc := getAccountByID(req.AccountID)
+		if acc == nil {
+			writeAPI(w, http.StatusNotFound, apiResponse{Error: tAPI(r, "account_not_found")})
+			return
+		}
 
-	// Reset status to active and refresh token, but preserve usage/token statistics.
-	acc.Status = "active"
-	if err := refreshAccountToken(acc); err != nil {
-		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: "reset failed: " + err.Error()})
-		return
-	}
+		// Reset status to active and refresh token, but preserve usage/token statistics.
+		acc.Status = "active"
+		if err := refreshAccountToken(acc); err != nil {
+			writeAPI(w, http.StatusInternalServerError, apiResponse{Error: tAPI(r, "reset_failed", err.Error())})
+			return
+		}
 
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "Account reset"})
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "account_reset")})
 }
 
 // POST /admin/api/accounts/test  body: { accountId?: "" }
 func handleAdminAccountTest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -788,10 +789,10 @@ func handleAdminAccountTest(w http.ResponseWriter, r *http.Request) {
 	var targets []*Account
 	if req.AccountID != "" {
 		acc := getAccountByID(req.AccountID)
-		if acc == nil {
-			writeAPI(w, http.StatusNotFound, apiResponse{Error: "account not found"})
-			return
-		}
+			if acc == nil {
+				writeAPI(w, http.StatusNotFound, apiResponse{Error: tAPI(r, "account_not_found")})
+				return
+			}
 		targets = []*Account{acc}
 	} else {
 		poolMu.Lock()
@@ -860,7 +861,7 @@ func handleAdminGetKeys(w http.ResponseWriter, r *http.Request) {
 // POST /admin/api/keys/generate
 func handleAdminGenerateKey(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	key := fmt.Sprintf("cline_%x_%x", time.Now().UnixMilli(), time.Now().UnixNano()%1000000)
@@ -875,7 +876,7 @@ func handleAdminGenerateKey(w http.ResponseWriter, r *http.Request) {
 // POST /admin/api/keys/delete  body: { key }
 func handleAdminDeleteKey(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -888,7 +889,7 @@ func handleAdminDeleteKey(w http.ResponseWriter, r *http.Request) {
 		Key string `json:"key"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
 		return
 	}
 	p := loadPool()
@@ -901,7 +902,7 @@ func handleAdminDeleteKey(w http.ResponseWriter, r *http.Request) {
 	}
 	poolMu.Unlock()
 	savePool()
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "Key deleted"})
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "key_deleted")})
 }
 
 // GET /admin/api/config
@@ -923,7 +924,7 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 // POST /admin/api/config  body: { strategy?, headers?, defaultModel?, host? }
 func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -940,7 +941,7 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		Host         string            `json:"host"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
 		return
 	}
 
@@ -954,7 +955,7 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			cfg.Strategy = req.Strategy
 			changed = true
 		default:
-			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid strategy, must be: round_robin, fill, random"})
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_strategy")})
 			return
 		}
 	}
@@ -976,7 +977,7 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !found {
-			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid default model, not in available models list"})
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_default_model")})
 			return
 		}
 		p := loadPool()
@@ -998,7 +999,7 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !valid {
-			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid host, must be 127.0.0.1, 0.0.0.0 or a local IP"})
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_host")})
 			return
 		}
 		p := loadPool()
@@ -1035,13 +1036,17 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 // GET /admin/api/models
 func handleAdminModels(w http.ResponseWriter, r *http.Request) {
 	models := getAllModels()
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"models": models}})
+	sync := getModelSyncResult()
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+		"models":   models,
+		"lastSync": sync,
+	}})
 }
 
 // POST /admin/api/models/add  body: { id, provider?, cost? }
 func handleAdminModelAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -1057,22 +1062,22 @@ func handleAdminModelAdd(w http.ResponseWriter, r *http.Request) {
 		Cost     string `json:"cost"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
 		return
 	}
 
-	if req.ID == "" {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "model id is required"})
-		return
-	}
-
-	// 校验不与已有模型重复
-	for _, m := range getAllModels() {
-		if m.ID == req.ID {
-			writeAPI(w, http.StatusConflict, apiResponse{Error: "model already exists"})
+		if req.ID == "" {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "model_id_required")})
 			return
 		}
-	}
+
+		// 校验不与已有模型重复
+		for _, m := range getAllModels() {
+			if m.ID == req.ID {
+				writeAPI(w, http.StatusConflict, apiResponse{Error: tAPI(r, "model_exists")})
+				return
+			}
+		}
 
 	// cost 默认为 pass
 	cost := req.Cost
@@ -1101,13 +1106,13 @@ func handleAdminModelAdd(w http.ResponseWriter, r *http.Request) {
 	poolMu.Unlock()
 	savePool()
 
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "model added"})
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "model_added")})
 }
 
 // POST /admin/api/models/delete  body: { id }
 func handleAdminModelDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 	body, err := io.ReadAll(r.Body)
@@ -1121,36 +1126,36 @@ func handleAdminModelDelete(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
 		return
 	}
 
-	if req.ID == "" {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "model id is required"})
-		return
-	}
-
-	p := loadPool()
-	poolMu.Lock()
-	found := false
-	for i, m := range p.Models {
-		if m.ID == req.ID {
-			// 仅允许删除自定义模型
-			if !m.Custom {
-				poolMu.Unlock()
-				writeAPI(w, http.StatusBadRequest, apiResponse{Error: "cannot delete builtin model"})
-				return
-			}
-			p.Models = append(p.Models[:i], p.Models[i+1:]...)
-			found = true
-			break
+		if req.ID == "" {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "model_id_required")})
+			return
 		}
-	}
-	if !found {
-		poolMu.Unlock()
-		writeAPI(w, http.StatusNotFound, apiResponse{Error: "model not found"})
-		return
-	}
+
+		p := loadPool()
+		poolMu.Lock()
+		found := false
+		for i, m := range p.Models {
+			if m.ID == req.ID {
+				// 仅允许删除自定义模型
+				if !m.Custom {
+					poolMu.Unlock()
+					writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "cannot_delete_builtin")})
+					return
+				}
+				p.Models = append(p.Models[:i], p.Models[i+1:]...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			poolMu.Unlock()
+			writeAPI(w, http.StatusNotFound, apiResponse{Error: tAPI(r, "model_not_found")})
+			return
+		}
 	// 若删除的是当前默认模型，则清空回退到内置默认
 	if p.DefaultModel == req.ID {
 		p.DefaultModel = ""
@@ -1158,13 +1163,13 @@ func handleAdminModelDelete(w http.ResponseWriter, r *http.Request) {
 	poolMu.Unlock()
 	savePool()
 
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "model deleted"})
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "model_deleted")})
 }
 
 // GET /admin/api/stats
 func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 
@@ -1208,7 +1213,7 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 // GET /admin/api/request-logs?limit=50&cursor=...
 func handleAdminRequestLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
-		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
 
@@ -1216,7 +1221,7 @@ func handleAdminRequestLogs(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("limit"); v != "" {
 		var n int
 		if _, err := fmt.Sscanf(v, "%d", &n); err != nil || n <= 0 {
-			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid limit"})
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_limit")})
 			return
 		}
 		limit = n

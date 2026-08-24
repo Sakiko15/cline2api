@@ -25,6 +25,8 @@ type Model struct {
 	Cost     string `json:"cost"`   // "free" | "pass"
 	Status   string `json:"status"` // "active"
 	Custom   bool   `json:"custom"` // true=用户手动添加，可删除
+	// Source 标记模型来源："remote"=从 Cline 官方接口同步，空=内置/用户自定义
+	Source string `json:"source,omitempty"`
 }
 
 type AccountPool struct {
