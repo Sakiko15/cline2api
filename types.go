@@ -29,8 +29,11 @@ type Model struct {
 	Cost     string `json:"cost"`   // "free" | "pass"
 	Status   string `json:"status"` // "active"
 	Custom   bool   `json:"custom"` // true=用户手动添加，可删除
-	// Source 标记模型来源："remote"=从 Cline 官方接口同步，空=内置/用户自定义
+	// Source 标记模型来源："remote"=从 Cline 官方接口同步，"zen"=从 opencode 官方接口同步，空=内置/用户自定义
 	Source string `json:"source,omitempty"`
+	// Context / Output 上下文与最大输出 token（opencode 模型记录；0=未知）
+	Context int `json:"context,omitempty"`
+	Output  int `json:"output,omitempty"`
 }
 
 // ModelStat 是单个模型在某账号下的用量统计（仅统计 free 模型）。

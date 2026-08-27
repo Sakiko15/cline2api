@@ -82,6 +82,9 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/keys/delete", auth(handleAdminDeleteKey))
 	mux.HandleFunc("/admin/api/models", auth(handleAdminModels))
 	mux.HandleFunc("/admin/api/models/sync", auth(handleAdminModelSync))
+	mux.HandleFunc("/admin/api/opencode/config", auth(handleOpenCodeConfig))
+	mux.HandleFunc("/admin/api/opencode/config/update", auth(handleOpenCodeConfigUpdate))
+	mux.HandleFunc("/admin/api/opencode/models/sync", auth(handleOpenCodeModelSync))
 	mux.HandleFunc("/admin/api/models/add", auth(handleAdminModelAdd))
 	mux.HandleFunc("/admin/api/models/delete", auth(handleAdminModelDelete))
 	mux.HandleFunc("/admin/api/config", auth(handleAdminConfig))
@@ -1036,6 +1039,12 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 // GET /admin/api/models
 func handleAdminModels(w http.ResponseWriter, r *http.Request) {
 	models := getAllModels()
+	// zen 模型计费归一化：与路由判定保持一致（种子白名单兜底），避免 UI 分组与分流不一致
+	for i := range models {
+		if isZenSource(models[i]) && isZenFreeModel(models[i]) && models[i].Cost != "free" {
+			models[i].Cost = "free"
+		}
+	}
 	sync := getModelSyncResult()
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
 		"models":   models,
@@ -1206,6 +1215,8 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			"cachedTokens":     cachedTokens,
 			"strategy":         "round_robin",
 			"version":          appVersion,
+			// opencode zen 免费模型今日用量（从请求日志聚合）
+			"opencodeToday": opencodeUsageToday(),
 		},
 	})
 }
@@ -1234,4 +1245,168 @@ func handleAdminRequestLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: page})
+}
+
+// GET /admin/api/opencode/config — opencode zen 配置 + 运行状态
+func handleOpenCodeConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	cfg := getZenConfig()
+	maskedProxies := make([]string, 0, len(cfg.Proxies))
+	for _, p := range cfg.Proxies {
+		maskedProxies = append(maskedProxies, maskProxyURL(p))
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+		"enabled":         cfg.Enabled,
+		"key":             cfg.Key,
+		"baseURL":         cfg.BaseURL,
+		"proxies":         maskedProxies,
+		"proxyStrategy":   cfg.ProxyStrategy,
+		"proxyCooldowns":  zenProxyCooldownStatus(),
+		"maxConcurrency":  cfg.MaxConcurrency,
+		"retries":         cfg.Retries,
+		"failover":        cfg.Failover,
+		"failoverCount":   cfg.FailoverCount,
+		"failoverMinutes": cfg.FailoverMinutes,
+		"compaction":      cfg.Compaction,
+		"runtime": map[string]any{
+			"failoverActive": zenFailedNow(),
+		},
+		"syncedModels": len(currentZenModels()),
+		"lastSync":     lastZenModelSync(),
+	}})
+}
+
+// POST /admin/api/opencode/config/update — 更新 opencode zen 配置（指针式补丁）
+func handleOpenCodeConfigUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		Enabled         *bool             `json:"enabled"`
+		Key             *string           `json:"key"`
+		BaseURL         *string           `json:"baseURL"`
+		Proxies         []string          `json:"proxies"`
+		ProxyStrategy   *string           `json:"proxyStrategy"`
+		MaxConcurrency  *int              `json:"maxConcurrency"`
+		Retries         *int              `json:"retries"`
+		Failover        *bool             `json:"failover"`
+		FailoverCount   *int              `json:"failoverCount"`
+		FailoverMinutes *int              `json:"failoverMinutes"`
+		Compaction      *zenCompactConfig `json:"compaction"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+
+	cfg := getZenConfig()
+	if req.Enabled != nil {
+		cfg.Enabled = *req.Enabled
+	}
+	if req.Key != nil {
+		cfg.Key = strings.TrimSpace(*req.Key)
+	}
+	if req.BaseURL != nil {
+		u := strings.TrimSpace(*req.BaseURL)
+		if u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_base_url")})
+			return
+		}
+		cfg.BaseURL = u
+	}
+	if req.Proxies != nil {
+		if err := validateProxyList(req.Proxies); err != nil {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+			return
+		}
+		var cleaned []string
+		for _, p := range req.Proxies {
+			if line := strings.TrimSpace(p); line != "" {
+				cleaned = append(cleaned, line)
+			}
+		}
+		cfg.Proxies = cleaned
+	}
+	if req.ProxyStrategy != nil {
+		switch *req.ProxyStrategy {
+		case "round_robin", "random", "fill":
+			cfg.ProxyStrategy = *req.ProxyStrategy
+		default:
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_proxy_strategy")})
+			return
+		}
+	}
+	if req.MaxConcurrency != nil {
+		if *req.MaxConcurrency < 1 || *req.MaxConcurrency > 64 {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_concurrency")})
+			return
+		}
+		cfg.MaxConcurrency = *req.MaxConcurrency
+	}
+	if req.Retries != nil {
+		if *req.Retries < 0 || *req.Retries > 10 {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_retries")})
+			return
+		}
+		cfg.Retries = *req.Retries
+	}
+	if req.Failover != nil {
+		cfg.Failover = *req.Failover
+	}
+	if req.FailoverCount != nil {
+		if *req.FailoverCount < 1 || *req.FailoverCount > 20 {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_failover")})
+			return
+		}
+		cfg.FailoverCount = *req.FailoverCount
+	}
+	if req.FailoverMinutes != nil {
+		if *req.FailoverMinutes < 1 || *req.FailoverMinutes > 120 {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_failover")})
+			return
+		}
+		cfg.FailoverMinutes = *req.FailoverMinutes
+	}
+	if req.Compaction != nil {
+		c := req.Compaction
+		if c.Buffer < 0 || c.KeepTokens < 0 || c.MaxSummary < 0 {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_compaction")})
+			return
+		}
+		cfg.Compaction.Auto = c.Auto
+		cfg.Compaction.Buffer = c.Buffer
+		cfg.Compaction.KeepTokens = c.KeepTokens
+		cfg.Compaction.SummaryModel = strings.TrimSpace(c.SummaryModel)
+		cfg.Compaction.MaxSummary = c.MaxSummary
+	}
+
+	setZenConfig(cfg)
+	log.Printf("admin: opencode config updated (enabled=%v)", cfg.Enabled)
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "opencode_config_saved")})
+}
+
+// POST /admin/api/opencode/models/sync — 手动触发一次 opencode 模型同步
+func handleOpenCodeModelSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	res := syncZenModels()
+	setLastZenModelSync(res)
+	if res.Error != "" {
+		writeAPI(w, http.StatusBadGateway, apiResponse{Success: false, Error: res.Error, Message: tAPI(r, "model_sync_failed")})
+		return
+	}
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: res, Message: tAPI(r, "model_sync_done")})
 }

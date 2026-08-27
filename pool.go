@@ -296,7 +296,9 @@ func listAccounts() []*Account {
 }
 
 func addAccountFromDeviceAuth() (*Account, error) {
-	fmt.Println("\n=== Add New Cline Account (OAuth) ===\n")
+	fmt.Println()
+	fmt.Println("=== Add New Cline Account (OAuth) ===")
+	fmt.Println()
 
 	device, err := workosDeviceAuth()
 	if err != nil {
@@ -311,7 +313,8 @@ func addAccountFromDeviceAuth() (*Account, error) {
 	fmt.Println("  1. Open this URL in your browser:")
 	fmt.Println("     " + authURL)
 	fmt.Println("  2. Enter code: " + device.UserCode)
-	fmt.Println("  3. Log in with Google, GitHub, or email\n")
+	fmt.Println("  3. Log in with Google, GitHub, or email")
+	fmt.Println()
 
 	_ = openBrowser(authURL)
 	fmt.Println("  Waiting for authorization...")

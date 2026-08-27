@@ -177,6 +177,35 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "模型同步失败",
 		localeEN: "Model sync failed",
 	},
+	// opencode zen 相关
+	"opencode_config_saved": {
+		localeZH: "opencode 配置已保存",
+		localeEN: "OpenCode config saved",
+	},
+	"invalid_base_url": {
+		localeZH: "无效的 Base URL，必须以 http:// 或 https:// 开头",
+		localeEN: "invalid base URL, must start with http:// or https://",
+	},
+	"invalid_proxy_strategy": {
+		localeZH: "无效的代理策略，可选：round_robin、random、fill",
+		localeEN: "invalid proxy strategy, must be: round_robin, random, fill",
+	},
+	"invalid_concurrency": {
+		localeZH: "最大并发必须在 1-64 之间",
+		localeEN: "max concurrency must be between 1 and 64",
+	},
+	"invalid_retries": {
+		localeZH: "重试次数必须在 0-10 之间",
+		localeEN: "retries must be between 0 and 10",
+	},
+	"invalid_failover": {
+		localeZH: "故障转移参数超出允许范围",
+		localeEN: "failover parameters out of range",
+	},
+	"invalid_compaction": {
+		localeZH: "压缩参数不能为负数",
+		localeEN: "compaction values cannot be negative",
+	},
 }
 
 func requestLocale(r *http.Request) locale {

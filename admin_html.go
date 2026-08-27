@@ -198,6 +198,13 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
 .model-tag.pass{border-color:var(--yellow);color:var(--yellow);background:var(--yellow-soft)}
 .model-item{display:inline-flex;align-items:center;gap:2px;margin:3px}
 .model-item .model-tag{margin:0}
+.model-group{margin:4px 0 10px}
+.model-group-head{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--text2);cursor:pointer;user-select:none;padding:5px 0}
+.model-group-head:hover{color:var(--text)}
+.model-group-caret{display:inline-block;width:12px;font-size:11px;color:var(--text3);transition:transform .15s}
+.model-group-head.expanded .model-group-caret{transform:rotate(90deg)}
+.model-group-count{font-size:11px;color:var(--text3);font-weight:400;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:0 7px;line-height:16px}
+.model-group-body{margin:2px 0 4px 18px}
 .warn-box{display:flex;align-items:flex-start;gap:8px;margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--yellow-soft);color:var(--yellow);font-size:13px;line-height:1.5;border:1px solid var(--yellow)}
 
 /* action row */
@@ -366,6 +373,27 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
     </div>
     </div>
   </div>
+  <div class="metric-section">
+    <div class="metric-heading">opencode 免费模型 · 今日用量</div>
+    <div class="cards tokens">
+      <div class="card yellow">
+      <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+      <div class="num" id="statOcRequests">-</div><div class="label">今日请求数</div>
+    </div>
+    <div class="card blue">
+      <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+      <div class="num" id="statOcInputTokens">-</div><div class="label">今日输入 Token</div>
+    </div>
+    <div class="card green">
+      <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+      <div class="num" id="statOcOutputTokens">-</div><div class="label">今日输出 Token</div>
+    </div>
+    <div class="card yellow">
+      <div class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+      <div class="num" id="statOcTotalTokens">-</div><div class="label">今日总 Token</div>
+    </div>
+    </div>
+  </div>
   <div class="section">
     <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>快捷操作</div>
     <div class="section-body action-row">
@@ -521,6 +549,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <span style="margin-left:auto;display:flex;align-items:center;gap:10px;font-size:12px;font-weight:400;color:var(--text3)">
         <span><span>上次同步</span>: <span id="modelSyncTime">从未同步</span></span>
         <button class="sync-btn" id="syncModelsBtn" onclick="syncModels()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>从 Cline 同步模型</span></button>
+        <button class="sync-btn" id="syncOcModelsBtn" onclick="syncOcModels()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>从 opencode 同步模型</span></button>
       </span>
     </div>
     <div class="section-body">
@@ -594,6 +623,77 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       </div>
       <div class="form-row">
         <div class="field"><label>账号文件</label><input type="text" id="settingPoolPath" disabled></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>opencode 免费模型</span>
+      <span style="margin-left:auto;display:flex;align-items:center;gap:10px;font-size:12px;font-weight:400;color:var(--text3)">
+        <span id="ocRuntimeStatus">-</span>
+      </span>
+    </div>
+    <div class="section-desc">接入 opencode（zen）免费模型。按请求中的模型名自动分流：免费模型走 opencode 上游，付费模型直接拒绝，其余走 Cline 账号池。</div>
+    <div class="section-body">
+      <div class="form-row">
+        <div class="field" style="max-width:220px">
+          <label>启用 opencode</label>
+          <select id="ocEnabled">
+            <option value="true">启用</option>
+            <option value="false">停用</option>
+          </select>
+        </div>
+        <div class="field" style="flex:1"><label>API Key</label><input type="text" id="ocKey" placeholder="public"></div>
+        <div class="field" style="flex:1.4"><label>Base URL</label><input type="text" id="ocBaseURL" placeholder="https://opencode.ai/zen/v1" style="font-family:ui-monospace,monospace"></div>
+      </div>
+      <div class="form-row" style="margin-top:12px">
+        <div class="field"><label>最大并发</label><input type="number" id="ocMaxConcurrency" min="1" max="64"></div>
+        <div class="field"><label>重试次数</label><input type="number" id="ocRetries" min="0" max="10"></div>
+        <div class="field"><label>故障转移</label>
+          <select id="ocFailover">
+            <option value="true">开启（连续失败后暂走 Cline 池）</option>
+            <option value="false">关闭</option>
+          </select>
+        </div>
+        <div class="field"><label>失败阈值（次）</label><input type="number" id="ocFailoverCount" min="1" max="20"></div>
+        <div class="field"><label>转移窗口（分钟）</label><input type="number" id="ocFailoverMinutes" min="1" max="120"></div>
+      </div>
+      <div class="form-row" style="margin-top:12px">
+        <div class="field"><label>自动上下文压缩</label>
+          <select id="ocCompactAuto">
+            <option value="true">开启（超限自动摘要）</option>
+            <option value="false">关闭</option>
+          </select>
+        </div>
+        <div class="field"><label>压缩缓冲 Token</label><input type="number" id="ocCompactBuffer" min="0"></div>
+        <div class="field"><label>尾部保留 Token</label><input type="number" id="ocCompactKeepTokens" min="0"></div>
+        <div class="field"><label>摘要最大 Token</label><input type="number" id="ocCompactMaxSummary" min="0"></div>
+      </div>
+      <div class="form-actions" style="margin-top:14px">
+        <button class="btn btn-primary" onclick="saveOcConfig()">保存 opencode 配置</button>
+      </div>
+      <div id="ocSaveResult" style="margin-top:8px"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>opencode 出口代理</div>
+    <div class="section-desc">发往 opencode 的请求可经代理池轮询出口；命中限流时冷却当前出口并自动跳过。支持 http / https / socks5 / socks5h，每行一个，如 <span class="mono">socks5://127.0.0.1:1080</span>。</div>
+    <div class="section-body">
+      <div class="form-row">
+        <div class="field" style="max-width:260px">
+          <label>代理策略</label>
+          <select id="ocProxyStrategy">
+            <option value="round_robin">轮询 (round_robin)</option>
+            <option value="random">随机 (random)</option>
+            <option value="fill">填满 (fill)</option>
+          </select>
+        </div>
+        <div class="field" style="flex:1"><label>出口冷却状态</label><div id="ocProxyCooldowns" style="font-size:12px;color:var(--text3)">-</div></div>
+      </div>
+      <div class="field" style="margin-top:10px">
+        <label>代理列表</label>
+        <textarea id="ocProxies" rows="4" style="width:100%;font-family:ui-monospace,monospace;font-size:12px;border:1px solid var(--border2);border-radius:8px;padding:8px;background:var(--surface);color:var(--text)" placeholder="socks5://127.0.0.1:1080&#10;http://user:pass@proxy.example.com:8080"></textarea>
       </div>
     </div>
   </div>
@@ -987,6 +1087,51 @@ const I18N = {
   '模型冷却中，约 ': 'Model cooling, ~',
   '后释放': ' until release',
   '暂无数据': 'No data yet',
+  // opencode 免费模型
+  '从 opencode 同步模型': 'Sync Models from opencode',
+  'opencode 模型列表已更新': 'opencode model list updated',
+  'opencode 免费模型 · 今日用量': 'opencode Free Models · Today',
+  '今日请求数': 'Requests today',
+  '今日输入 Token': 'Input tokens today',
+  '今日输出 Token': 'Output tokens today',
+  '今日总 Token': 'Total tokens today',
+  '启用 opencode': 'Enable opencode',
+  '启用': 'Enabled',
+  '停用': 'Disabled',
+  'API Key': 'API Key',
+  'Base URL': 'Base URL',
+  '最大并发': 'Max concurrency',
+  '重试次数': 'Retries',
+  '故障转移': 'Failover',
+  '开启（连续失败后暂走 Cline 池）': 'On (temporarily route to Cline pool after consecutive failures)',
+  '关闭': 'Off',
+  '失败阈值（次）': 'Failure threshold',
+  '转移窗口（分钟）': 'Failover window (min)',
+  '自动上下文压缩': 'Auto context compaction',
+  '开启（超限自动摘要）': 'On (auto summary when over limit)',
+  '压缩缓冲 Token': 'Compaction buffer (tokens)',
+  '尾部保留 Token': 'Tail keep tokens',
+  '摘要最大 Token': 'Max summary tokens',
+  '保存 opencode 配置': 'Save opencode Config',
+  'opencode 配置已保存': 'OpenCode config saved',
+  'opencode 出口代理': 'OpenCode Egress Proxies',
+  '发往 opencode 的请求可经代理池轮询出口；命中限流时冷却当前出口并自动跳过。支持 http / https / socks5 / socks5h，每行一个，如 ': 'Requests to opencode can egress through a rotating proxy pool; the current proxy is cooled down and skipped on rate limits. Supports http / https / socks5 / socks5h, one per line, e.g. ',
+  '代理策略': 'Proxy strategy',
+  '出口冷却状态': 'Egress cooldowns',
+  '代理列表': 'Proxy list',
+  '无冷却': 'None cooling',
+  '已停用': 'Paused',
+  '故障转移中（opencode 暂不可用，请求走 Cline 池）': 'Failover active (opencode unavailable, requests routed to Cline pool)',
+  '正常': 'Healthy',
+  '已同步模型': 'Models synced',
+  '接入 opencode（zen）免费模型。按请求中的模型名自动分流：免费模型走 opencode 上游，付费模型直接拒绝，其余走 Cline 账号池。': 'Integrates opencode (zen) free models. Requests are routed automatically by model name: free models go to the opencode upstream, paid models are rejected, everything else goes to the Cline account pool.',
+  // 模型分组
+  'opencode · 免费模型': 'opencode · Free Models',
+  'opencode · 付费模型': 'opencode · Paid Models',
+  'Cline · 免费模型': 'Cline · Free Models',
+  'Cline · 付费模型': 'Cline · Paid Models',
+  '用户自定义': 'User Custom',
+  '点击展开/折叠': 'Click to expand/collapse',
 };
 let LANG = 'zh';
 const LC = () => LANG === 'en' ? 'en-US' : 'zh-CN';
@@ -1084,7 +1229,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
 loadStats(); loadAccounts(); }
     if (el.dataset.tab === 'accounts') loadAccounts();
     if (el.dataset.tab === 'logs') loadRequestLogs(true);
-    if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); }
+    if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); loadOcConfig(); }
   });
 });
 
@@ -1097,7 +1242,7 @@ function switchTab(name) {
   if (name === 'dashboard') { loadStats(); loadAccounts(); }
   if (name === 'accounts') loadAccounts();
   if (name === 'logs') loadRequestLogs(true);
-  if (name === 'settings') { loadKeys(); loadModels(); }
+  if (name === 'settings') { loadKeys(); loadModels(); loadOcConfig(); }
 }
 
 // 导入子标签
@@ -1173,6 +1318,11 @@ async function loadStats() {
     _('statCompletionTokens').textContent = formatTokenCount(s.completionTokens);
     _('statTotalTokens').textContent = formatTokenCount(s.totalTokens);
     _('statCachedTokens').textContent = formatTokenCount(s.cachedTokens);
+    const oc = s.opencodeToday || {};
+    _('statOcRequests').textContent = oc.requests != null ? oc.requests : '-';
+    _('statOcInputTokens').textContent = formatTokenCount(oc.inputTokens || 0);
+    _('statOcOutputTokens').textContent = formatTokenCount(oc.outputTokens || 0);
+    _('statOcTotalTokens').textContent = formatTokenCount(oc.totalTokens || 0);
     if (s.version) _('settingVersion').value = s.version;
     if (s.strategy) _('settingStrategy').value = s.strategy;
   } catch (e) { /* ignore */ }
@@ -1645,18 +1795,59 @@ async function saveHeaders() {
 // ========== 模型列表 ==========
 let _cachedModels = [];
 let _modelSyncSeen = false;
+let _modelGroupOpen = {}; // 模型分组展开状态（跨刷新保持，付费组默认折叠）
+
+function isOcModel(m) { return m.source === 'zen' || m.provider === 'opencode'; }
+
+function renderModelChip(m) {
+  let item = '<span class="model-tag ' + (m.cost || 'free') + '">' + esc(m.id) + '</span>';
+  if (m.custom) {
+    item += '<button class="btn btn-sm btn-danger" style="padding:2px 6px" onclick="deleteModel(\'' + esc(m.id) + '\')" title="' + t('删除') + '">✕</button>';
+  }
+  return '<span class="model-item">' + item + '</span>';
+}
+
+// 模型分组渲染：opencode / Cline 分类，付费模型默认折叠，点击组头展开
+function renderModelGroups(models) {
+  const groups = [
+    { key: 'oc-free', label: 'opencode · 免费模型', filter: m => isOcModel(m) && m.cost === 'free', collapsed: false },
+    { key: 'oc-pass', label: 'opencode · 付费模型', filter: m => isOcModel(m) && m.cost !== 'free', collapsed: true },
+    { key: 'cl-free', label: 'Cline · 免费模型', filter: m => !isOcModel(m) && !m.custom && m.cost === 'free', collapsed: false },
+    { key: 'cl-pass', label: 'Cline · 付费模型', filter: m => !isOcModel(m) && !m.custom && m.cost !== 'free', collapsed: true },
+    { key: 'custom', label: '用户自定义', filter: m => m.custom, collapsed: false },
+  ];
+  return groups.map(g => {
+    const items = models.filter(g.filter);
+    if (items.length === 0) return '';
+    const open = g.collapsed ? (_modelGroupOpen[g.key] === true) : (_modelGroupOpen[g.key] !== false);
+    const chips = items.map(renderModelChip).join('');
+    return '<div class="model-group">' +
+      '<div class="model-group-head' + (open ? ' expanded' : '') + '" data-key="' + g.key + '" onclick="toggleModelGroup(\'' + g.key + '\')" title="' + t('点击展开/折叠') + '">' +
+        '<span class="model-group-caret">▸</span>' +
+        '<span class="model-group-label">' + t(g.label) + '</span>' +
+        '<span class="model-group-count">' + items.length + '</span>' +
+      '</div>' +
+      '<div class="model-group-body" style="display:' + (open ? 'block' : 'none') + '">' + chips + '</div>' +
+    '</div>';
+  }).join('') || '<div class="empty">' + t('暂无模型') + '</div>';
+}
+
+function toggleModelGroup(key) {
+  const head = document.querySelector('.model-group-head[data-key="' + key + '"]');
+  if (!head) return;
+  const open = !head.classList.contains('expanded');
+  head.classList.toggle('expanded', open);
+  const body = head.parentElement.querySelector('.model-group-body');
+  if (body) body.style.display = open ? 'block' : 'none';
+  _modelGroupOpen[key] = open;
+}
+
 async function loadModels() {
   try {
     const d = await api('GET', '/models');
     const models = d.data.models || [];
     _cachedModels = models;
-    _('modelsList').innerHTML = models.map(m => {
-      let item = '<span class="model-tag ' + (m.cost || 'free') + '">' + esc(m.id) + '</span>';
-      if (m.custom) {
-        item += '<button class="btn btn-sm btn-danger" style="padding:2px 6px" onclick="deleteModel(\'' + esc(m.id) + '\')" title="' + t('删除') + '">✕</button>';
-      }
-      return '<span class="model-item">' + item + '</span>';
-    }).join('') || '<div class="empty">' + t('暂无模型') + '</div>';
+    _('modelsList').innerHTML = renderModelGroups(models);
     const ls = d.data.lastSync || {};
     if (_('modelSyncTime')) {
       _('modelSyncTime').textContent = ls.syncedAt ? new Date(ls.syncedAt).toLocaleString(LC()) : t('从未同步');
@@ -1688,6 +1879,96 @@ async function syncModels() {
     toast(t('模型同步失败') + ': ' + (e.message || ''), 'error');
   }
   if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+}
+
+async function syncOcModels() {
+  const btn = _('syncOcModelsBtn');
+  const orig = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading"></span> ' + t('同步中...'); }
+  try {
+    const d = await api('POST', '/opencode/models/sync');
+    const res = d.data || {};
+    await loadModels();
+    if (res.changed) {
+      showModelSyncModal(res);
+      toast(t('opencode 模型列表已更新'), 'success');
+    } else {
+      toast(t('模型无变化'), 'info');
+    }
+  } catch (e) {
+    toast(t('模型同步失败') + ': ' + (e.message || ''), 'error');
+  }
+  if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+}
+
+// ========== opencode 免费模型配置 ==========
+async function loadOcConfig() {
+  try {
+    const d = await api('GET', '/opencode/config');
+    const c = d.data;
+    _('ocEnabled').value = String(!!c.enabled);
+    if (c.key) _('ocKey').value = c.key;
+    if (c.baseURL) _('ocBaseURL').value = c.baseURL;
+    _('ocMaxConcurrency').value = c.maxConcurrency;
+    _('ocRetries').value = c.retries;
+    _('ocFailover').value = String(!!c.failover);
+    _('ocFailoverCount').value = c.failoverCount;
+    _('ocFailoverMinutes').value = c.failoverMinutes;
+    const cp = c.compaction || {};
+    _('ocCompactAuto').value = String(!!cp.auto);
+    _('ocCompactBuffer').value = cp.buffer != null ? cp.buffer : 20000;
+    _('ocCompactKeepTokens').value = cp.keepTokens != null ? cp.keepTokens : 8000;
+    _('ocCompactMaxSummary').value = cp.maxSummary != null ? cp.maxSummary : 4096;
+    _('ocProxyStrategy').value = c.proxyStrategy || 'round_robin';
+    _('ocProxies').value = (c.proxies || []).join('\n');
+    // 运行状态与出口冷却
+    const rt = c.runtime || {};
+    let status;
+    if (!c.enabled) status = '<span style="color:var(--text3)">⏸ ' + t('已停用') + '</span>';
+    else if (rt.failoverActive) status = '<span style="color:var(--red)">🔴 ' + t('故障转移中（opencode 暂不可用，请求走 Cline 池）') + '</span>';
+    else status = '<span style="color:var(--green)">🟢 ' + t('正常') + '</span>' +
+      '<span style="margin-left:8px">' + t('已同步模型') + ': ' + (c.syncedModels || 0) + '</span>';
+    _('ocRuntimeStatus').innerHTML = status;
+    const cds = c.proxyCooldowns || {};
+    const entries = Object.entries(cds);
+    _('ocProxyCooldowns').textContent = entries.length
+      ? entries.map(([p, until]) => maskProxyForDisplay(p) + ' → ' + until).join('; ')
+      : t('无冷却');
+  } catch (e) { /* ignore */ }
+}
+
+function maskProxyForDisplay(p) {
+  return p.replace(/\/\/([^@/]+)@/, '//***@');
+}
+
+async function saveOcConfig() {
+  const numOr = (id, def) => { const v = parseInt(_(id).value, 10); return isNaN(v) ? def : v; };
+  const payload = {
+    enabled: _('ocEnabled').value === 'true',
+    key: _('ocKey').value.trim(),
+    baseURL: _('ocBaseURL').value.trim(),
+    maxConcurrency: numOr('ocMaxConcurrency', 8),
+    retries: numOr('ocRetries', 3),
+    failover: _('ocFailover').value === 'true',
+    failoverCount: numOr('ocFailoverCount', 3),
+    failoverMinutes: numOr('ocFailoverMinutes', 5),
+    proxyStrategy: _('ocProxyStrategy').value,
+    proxies: _('ocProxies').value.split('\n').map(s => s.trim()).filter(Boolean),
+    compaction: {
+      auto: _('ocCompactAuto').value === 'true',
+      buffer: numOr('ocCompactBuffer', 20000),
+      keepTokens: numOr('ocCompactKeepTokens', 8000),
+      maxSummary: numOr('ocCompactMaxSummary', 4096),
+    },
+  };
+  try {
+    await api('POST', '/opencode/config/update', payload);
+    _('ocSaveResult').innerHTML = '<span style="color:var(--green)">✓ ' + t('opencode 配置已保存') + '</span>';
+    setTimeout(() => _('ocSaveResult').innerHTML = '', 5000);
+    await loadOcConfig();
+  } catch (e) {
+    toast(t('保存失败: ') + (e.message || ''), 'error');
+  }
 }
 
 function showModelSyncModal(res) {

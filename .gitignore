@@ -1,10 +1,15 @@
 .cline-accounts.json
 .cline-credentials.json
 .cline-request-logs.json
+.cline-zen.json
 cline-proxy
 cline-proxy.exe
 cline-proxy.exe~
+cline-go-proxy.exe
 .zcode/
+
+# 参考项目（opencode 集成参考，非本仓库代码）
+opencode-ref/
 
 # Windows icon resource (auto-linked by go build, must be in repo for CI)
 !resource_windows_amd64.syso

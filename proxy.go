@@ -36,8 +36,8 @@ var builtinModels = []Model{
 }
 
 // getAllModels 返回可用模型列表：
-//   - 已同步远程模型：远程（Source=remote）+ 用户自定义
-//   - 未同步 / 离线：内置 fallback + 用户自定义
+//   - 已同步远程模型：Cline 远程（Source=remote）+ opencode 同步（Source=zen）+ 用户自定义
+//   - 未同步 / 离线：内置 fallback（Cline + zen 种子表）+ 用户自定义
 func getAllModels() []Model {
 	p := loadPool()
 	poolMu.Lock()
@@ -45,23 +45,32 @@ func getAllModels() []Model {
 
 	var custom []Model
 	var remote []Model
+	var zen []Model
 	for _, m := range p.Models {
-		if m.Source == "remote" {
+		switch m.Source {
+		case "remote":
 			remote = append(remote, m)
-		} else {
+		case "zen":
+			zen = append(zen, m)
+		default:
 			custom = append(custom, m)
 		}
 	}
 
-	if len(remote) > 0 {
-		result := make([]Model, 0, len(remote)+len(custom))
+	if len(remote) > 0 || len(zen) > 0 || remoteZenActive() {
+		result := make([]Model, 0, len(remote)+len(zen)+len(custom))
 		result = append(result, remote...)
+		result = append(result, zen...)
 		result = append(result, custom...)
 		return result
 	}
 
-	result := make([]Model, 0, len(builtinModels)+len(custom))
-	result = append(result, builtinModels...)
+	builtin := make([]Model, 0, len(builtinModels)+len(zenSeedModels))
+	builtin = append(builtin, builtinModels...)
+	builtin = append(builtin, builtinZenModels()...)
+
+	result := make([]Model, 0, len(builtin)+len(custom))
+	result = append(result, builtin...)
 	result = append(result, custom...)
 	return result
 }
@@ -224,6 +233,12 @@ func startProxy(host string, port int) error {
 	// 启动时异步同步一次 Cline 官方推荐模型（不阻塞启动）
 	startModelSync()
 
+	// opencode zen：定时同步免费模型列表 + 压缩会话状态清理
+	if getZenConfig().Enabled {
+		startZenModelsRefresher()
+	}
+	startCompactCleanup()
+
 	freePort(port)
 
 	mux := http.NewServeMux()
@@ -288,11 +303,15 @@ func startProxy(host string, port int) error {
 		all := getAllModels()
 		list := make([]map[string]any, len(all))
 		for i, m := range all {
+			ownedBy := "cline"
+			if m.Source == "zen" || m.Provider == "opencode" {
+				ownedBy = "opencode"
+			}
 			list[i] = map[string]any{
 				"id":      m.ID,
 				"object":  "model",
 				"created": time.Now().UnixMilli(),
-				"owned_by": "cline",
+				"owned_by": ownedBy,
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": list})
@@ -362,6 +381,50 @@ func startProxy(host string, port int) error {
 			}
 		}
 
+		// 按 model 自动分流：zen 免费模型 / zen 付费拒绝 / 其余走 Cline 池
+		switch routeModel(model) {
+		case "reject":
+			msg := fmt.Sprintf("model %q is a paid opencode model; only free models are proxied", model)
+			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, msg)
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": map[string]string{"message": msg, "type": "invalid_request_error"},
+			})
+			return
+		case "zen":
+			reqLog.Upstream = upstreamOpenCode
+			zm, _ := resolveZenInfo(model)
+			out := maybeCompact(params, zm, requestSessionID(params, r.Header))
+			if out.changed {
+				log.Printf("  chat %s", out.note)
+			}
+			resp, err := callZenAPI(params, isStream)
+			if err != nil {
+				log.Printf("  api error: %v", err)
+				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
+				writeJSON(w, http.StatusBadGateway, map[string]any{
+					"error": map[string]string{"message": err.Error(), "type": "api_error"},
+				})
+				return
+			}
+			defer resp.Body.Close()
+			if isStream {
+				handleStreamResponse(w, resp, nil, &reqLog)
+			} else {
+				handleNonStreamResponse(w, resp, nil, &reqLog)
+			}
+			return
+		}
+
+		if activeCount == 0 && len(loadPool().Accounts) == 0 {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error": map[string]string{
+					"message": "No accounts in pool. Run with --add-account or POST /admin/login to add accounts.",
+					"type":    "auth_error",
+				},
+			})
+			return
+		}
+
 		resp, acc, err := callClineAPI(params, isStream)
 		if err != nil {
 			log.Printf("  api error: %v", err)
@@ -371,6 +434,7 @@ func startProxy(host string, port int) error {
 			})
 			return
 		}
+		reqLog.Upstream = upstreamCline
 		defer resp.Body.Close()
 		if acc != nil {
 			reqLog.AccountID = acc.AccountID
@@ -396,6 +460,17 @@ func startProxy(host string, port int) error {
 	})
 	mux.HandleFunc("/v1/messages", anthropicHandler)
 	mux.HandleFunc("/messages", anthropicHandler)
+
+	// OpenAI Responses API support（所有上游：zen 免费模型 + Cline 账号池）
+	responsesHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		handleResponses(w, r)
+	})
+	mux.HandleFunc("/v1/responses", responsesHandler)
+	mux.HandleFunc("/responses", responsesHandler)
 
 	if host == "" {
 		host = "127.0.0.1"
@@ -430,6 +505,11 @@ func startProxy(host string, port int) error {
 	fmt.Println("  API Key: any value")
 	fmt.Printf("  Model:   %s\n", getDefaultModel())
 	fmt.Printf("  Accounts: %d total, %d active\n", len(loadPool().Accounts), activeCount)
+	if zc := getZenConfig(); zc.Enabled {
+		fmt.Printf("  OpenCode: enabled (%s free models)\n", strings.TrimRight(zc.BaseURL, "/"))
+	} else {
+		fmt.Println("  OpenCode: disabled")
+	}
 	fmt.Println(strings.Repeat("=", 58))
 
 	return server.ListenAndServe()
@@ -1410,6 +1490,56 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	reqLog := RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: req.Model, Stream: req.Stream}
 
+	// 按 model 自动分流（与 chat 端点一致）：zen 免费/付费拒绝/Cline 池
+	switch routeModel(req.Model) {
+	case "reject":
+		msg := fmt.Sprintf("model %q is a paid opencode model; only free models are proxied", req.Model)
+		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, msg)
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": map[string]string{"message": msg, "type": "invalid_request_error"},
+		})
+		return
+	case "zen":
+		reqLog.Upstream = upstreamOpenCode
+		zm, _ := resolveZenInfo(req.Model)
+		out := maybeCompact(openAIReq, zm, requestSessionID(map[string]any{"session_id": r.Header.Get("x-opencode-session")}, nil))
+		if out.changed {
+			log.Printf("  anthropic %s", out.note)
+		}
+		resp, err := callZenAPI(openAIReq, req.Stream)
+		if err != nil {
+			log.Printf("  anthropic api error: %v", err)
+			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"error": map[string]string{"message": err.Error(), "type": "api_error"},
+			})
+			return
+		}
+		defer resp.Body.Close()
+		if req.Stream {
+			handleAnthropicStream(w, resp, nil, &reqLog)
+		} else {
+			var raw map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
+				writeJSON(w, http.StatusInternalServerError, map[string]any{
+					"error": map[string]string{"message": err.Error(), "type": "parse_error"},
+				})
+				return
+			}
+			out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
+			usage := parseTokenUsage(out2["usage"])
+			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
+			anthropicResp := openAIToAnthropic(out2)
+			if tc, ok := getNested(out2, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
+				anthropicResp["content"] = []any{}
+				anthropicResp["stop_reason"] = "tool_use"
+			}
+			writeJSON(w, http.StatusOK, anthropicResp)
+		}
+		return
+	}
+
 	activeCount := 0
 	p := loadPool()
 	for _, a := range p.Accounts {
@@ -1437,6 +1567,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	reqLog.Upstream = upstreamCline
 	defer resp.Body.Close()
 	if acc != nil {
 		reqLog.AccountID = acc.AccountID
