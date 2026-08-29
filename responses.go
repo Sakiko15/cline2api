@@ -85,8 +85,8 @@ func responsesInputToMessages(input any) []any {
 					"role":    "assistant",
 					"content": "",
 					"tool_calls": []any{map[string]any{
-						"id":   callID,
-						"type": "function",
+						"id":       callID,
+						"type":     "function",
 						"function": map[string]any{"name": name, "arguments": args},
 					}},
 				})
@@ -532,10 +532,13 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	default: // cline
 		reqLog.Upstream = upstreamCline
 		upResp, acc, err := callClineAPI(chat, isStream)
+		if effectiveModel, ok := chat["model"].(string); ok && effectiveModel != "" {
+			reqLog.Model = effectiveModel
+		}
 		if err != nil {
 			log.Printf("  responses api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
+			writeJSON(w, clineErrorHTTPStatus(err), map[string]any{
 				"error": map[string]string{"message": err.Error(), "type": "api_error"},
 			})
 			return
