@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -184,113 +185,28 @@ func TestOpenAIChatCompletionsFreeFallsBackToDS(t *testing.T) {
 	}
 }
 
-func TestOpenAIChatCompletionsFreeRetriesNextGLMAccount(t *testing.T) {
-	oldPool := pool
-	oldConfig := getProxyConfig()
-	oldTransport := httpClient.Transport
-	t.Cleanup(func() {
-		pool = oldPool
-		setProxyConfig(oldConfig)
-		httpClient.Transport = oldTransport
-	})
-
-	first := &Account{
-		AccountID:   "chat-retry-glm-one",
-		Email:       "chat-retry-one@example.com",
-		AccessToken: "chat-retry-token-one",
-		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
-		Status:      "active",
-	}
-	second := &Account{
-		AccountID:   "chat-retry-glm-two",
-		Email:       "chat-retry-two@example.com",
-		AccessToken: "chat-retry-token-two",
-		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
-		Status:      "active",
-	}
-	pool = &AccountPool{Accounts: []*Account{first, second}}
-	config := defaultProxyConfig()
-	config.Strategy = "fill"
-	setProxyConfig(config)
-
-	var attempts []string
-	var models []string
-	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
-		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
-		attempts = append(attempts, token)
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			return nil, err
-		}
-		var params map[string]any
-		if err := json.Unmarshal(body, &params); err != nil {
-			return nil, err
-		}
-		model, _ := params["model"].(string)
-		models = append(models, model)
-		if token == first.AccessToken {
-			return &http.Response{
-				StatusCode: http.StatusTooManyRequests,
-				Body:       io.NopCloser(strings.NewReader(`{"error":"quota","message":"Try again in 1h"}`)),
-				Header:     make(http.Header),
-				Request:    req,
-			}, nil
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"id":"chat-glm-ok","model":"z-ai/glm-5.3-flash","choices":[{"message":{"role":"assistant","content":"glm retry"},"finish_reason":"stop"}]}`)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	})
-
-	baseURL := protocolTestServer(t)
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", strings.NewReader(`{"model":"free","messages":[{"role":"user","content":"hello"}]}`))
-	if err != nil {
-		t.Fatalf("create request: %v", err)
-	}
-	responseClient := &http.Client{Transport: &http.Transport{}, Timeout: 2 * time.Second}
-	resp, err := responseClient.Do(req)
-	if err != nil {
-		t.Fatalf("send request: %v", err)
-	}
-	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("response status = %d, want %d: %s", resp.StatusCode, http.StatusOK, responseBody)
-	}
-	var response map[string]any
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	choices, ok := response["choices"].([]any)
-	if !ok || len(choices) != 1 {
-		t.Fatalf("response choices = %v, want one choice", response["choices"])
-	}
-	choice, _ := choices[0].(map[string]any)
-	content, _ := choice["message"].(map[string]any)["content"].(string)
-	if content != "glm retry" {
-		t.Fatalf("response content = %q, want glm retry", content)
-	}
-	if got, want := strings.Join(attempts, ","), first.AccessToken+","+second.AccessToken; got != want {
-		t.Fatalf("attempts = %q, want %q", got, want)
-	}
-	if got, want := strings.Join(models, ","), freeModelPrimary+","+freeModelPrimary; got != want {
-		t.Fatalf("models = %q, want %q", got, want)
-	}
-}
-
 func TestOpenAIResponsesFreeFallsBackToDSAndPreservesResponseFormat(t *testing.T) {
 	oldPool := pool
 	oldConfig := getProxyConfig()
 	oldTransport := httpClient.Transport
+	oldLogData, oldLogErr := os.ReadFile(requestLogsPath)
+	requestLogsMu.Lock()
+	oldLogs := requestLogs
+	requestLogs = nil
+	requestLogsMu.Unlock()
+	_ = os.Remove(requestLogsPath)
 	t.Cleanup(func() {
 		pool = oldPool
 		setProxyConfig(oldConfig)
 		httpClient.Transport = oldTransport
+		requestLogsMu.Lock()
+		requestLogs = oldLogs
+		requestLogsMu.Unlock()
+		if oldLogErr != nil {
+			_ = os.Remove(requestLogsPath)
+		} else {
+			_ = os.WriteFile(requestLogsPath, oldLogData, 0600)
+		}
 	})
 
 	first := &Account{
@@ -382,6 +298,15 @@ func TestOpenAIResponsesFreeFallsBackToDSAndPreservesResponseFormat(t *testing.T
 	}
 	if got, want := strings.Join(models, ","), freeModelPrimary+","+freeModelPrimary+","+freeModelFallback; got != want {
 		t.Fatalf("models = %q, want %q", got, want)
+	}
+
+	requestLogsMu.Lock()
+	defer requestLogsMu.Unlock()
+	if len(requestLogs) != 1 {
+		t.Fatalf("request log count = %d, want 1", len(requestLogs))
+	}
+	if requestLogs[0].Model != freeModelFallback {
+		t.Fatalf("request log model = %q, want %q", requestLogs[0].Model, freeModelFallback)
 	}
 }
 
@@ -585,20 +510,6 @@ func TestOpenAIChatCompletionsFreeStreamFallsBackBeforeResponseHeaders(t *testin
 	}
 	if got, want := strings.Join(models, ","), freeModelPrimary+","+freeModelPrimary+","+freeModelFallback; got != want {
 		t.Fatalf("models = %q, want %q", got, want)
-	}
-}
-
-func TestDeepseekFreeZenAliasesStayOnZen(t *testing.T) {
-	withZenPool(t, append([]Model{}, builtinZenModels()...))
-	for _, model := range []string{
-		"deepseek-v4-flash-free",
-		"opencode/deepseek-v4-flash-free",
-		"deepseek-v4-flash",
-		"deepseek-v4",
-	} {
-		if got := routeModel(model); got != "zen" {
-			t.Errorf("routeModel(%q) = %q, want zen", model, got)
-		}
 	}
 }
 

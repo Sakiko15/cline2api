@@ -94,10 +94,16 @@ func TestRouteModelZenFree(t *testing.T) {
 	if got := routeModel("deepseek-v4-flash-free"); got != "zen" {
 		t.Errorf("routeModel(free seed model) = %q, want zen", got)
 	}
+	if got := routeModel("opencode/deepseek-v4-flash-free"); got != "zen" {
+		t.Errorf("routeModel(prefixed free seed model) = %q, want zen", got)
+	}
 	if got := routeModel("opencode/mimo-v2.5-free"); got != "zen" {
 		t.Errorf("routeModel(opencode/ prefix) = %q, want zen", got)
 	}
 	// 别名
+	if got := routeModel("deepseek-v4-flash"); got != "zen" {
+		t.Errorf("routeModel(free model alias) = %q, want zen", got)
+	}
 	if got := routeModel("deepseek-v4"); got != "zen" {
 		t.Errorf("routeModel(alias) = %q, want zen", got)
 	}

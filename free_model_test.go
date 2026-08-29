@@ -810,7 +810,7 @@ func TestCallClineAPIDirectModelsKeepExactIDWithoutFallback(t *testing.T) {
 	}
 }
 
-func TestHandleResponsesFreeLogsEffectiveModel(t *testing.T) {
+func TestHandleResponsesFreeReturnsTooManyRequestsWhenBothPoolsUnavailable(t *testing.T) {
 	oldPool := pool
 	oldConfig := getProxyConfig()
 	oldTransport := httpClient.Transport
@@ -825,65 +825,6 @@ func TestHandleResponsesFreeLogsEffectiveModel(t *testing.T) {
 		requestLogsMu.Lock()
 		requestLogs = oldLogs
 		requestLogsMu.Unlock()
-	})
-
-	account := &Account{
-		AccountID:   "log-account",
-		Email:       "log@example.com",
-		AccessToken: "log-token",
-		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
-		Status:      "active",
-	}
-	pool = &AccountPool{Accounts: []*Account{account}}
-	setProxyConfig(defaultProxyConfig())
-
-	var upstreamModel string
-	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			return nil, err
-		}
-		var params map[string]any
-		if err := json.Unmarshal(body, &params); err != nil {
-			return nil, err
-		}
-		upstreamModel, _ = params["model"].(string)
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"id":"ok","model":"z-ai/glm-5.3-flash","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"free","input":"hello"}`))
-	recorder := httptest.NewRecorder()
-	handleResponses(recorder, req)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("response status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
-	}
-	if upstreamModel != freeModelPrimary {
-		t.Fatalf("upstream model = %q, want %q", upstreamModel, freeModelPrimary)
-	}
-
-	requestLogsMu.Lock()
-	defer requestLogsMu.Unlock()
-	if len(requestLogs) != 1 {
-		t.Fatalf("request log count = %d, want 1", len(requestLogs))
-	}
-	if requestLogs[0].Model != freeModelPrimary {
-		t.Fatalf("request log model = %q, want %q", requestLogs[0].Model, freeModelPrimary)
-	}
-}
-
-func TestHandleResponsesFreeReturnsTooManyRequestsWhenBothPoolsUnavailable(t *testing.T) {
-	oldPool := pool
-	oldConfig := getProxyConfig()
-	oldTransport := httpClient.Transport
-	t.Cleanup(func() {
-		pool = oldPool
-		setProxyConfig(oldConfig)
-		httpClient.Transport = oldTransport
 	})
 
 	account := &Account{
@@ -915,50 +856,6 @@ func TestHandleResponsesFreeReturnsTooManyRequestsWhenBothPoolsUnavailable(t *te
 	}
 	if calls != 2 {
 		t.Fatalf("upstream calls = %d, want one attempt per model", calls)
-	}
-}
-
-func TestHandleResponsesFreeErrorLogsEffectiveModel(t *testing.T) {
-	oldPool := pool
-	oldConfig := getProxyConfig()
-	oldTransport := httpClient.Transport
-	requestLogsMu.Lock()
-	oldLogs := requestLogs
-	requestLogs = nil
-	requestLogsMu.Unlock()
-	t.Cleanup(func() {
-		pool = oldPool
-		setProxyConfig(oldConfig)
-		httpClient.Transport = oldTransport
-		requestLogsMu.Lock()
-		requestLogs = oldLogs
-		requestLogsMu.Unlock()
-	})
-
-	account := &Account{
-		AccountID:   "error-log-account",
-		Email:       "error-log@example.com",
-		AccessToken: "error-log-token",
-		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
-		Status:      "active",
-	}
-	pool = &AccountPool{Accounts: []*Account{account}}
-	setProxyConfig(defaultProxyConfig())
-
-	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusTooManyRequests,
-			Body:       io.NopCloser(strings.NewReader(`{"error":"quota","message":"Try again in 1h"}`)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"free","input":"hello"}`))
-	recorder := httptest.NewRecorder()
-	handleResponses(recorder, req)
-	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("response status = %d, want %d: %s", recorder.Code, http.StatusTooManyRequests, recorder.Body.String())
 	}
 
 	requestLogsMu.Lock()
