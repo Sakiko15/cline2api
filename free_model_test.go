@@ -680,15 +680,15 @@ func TestCallClineAPIFreeDoesNotPickCoolingAccount(t *testing.T) {
 	})
 
 	account := &Account{
-		AccountID:   "glm-cooling",
-		Email:       "cooling@example.com",
-		AccessToken: "token-cooling",
-		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
-		Status:      "active",
-		ModelCooldowns: map[string]time.Time{
-			freeModelPrimary:  time.Now().Add(time.Hour),
-			freeModelFallback: time.Now().Add(time.Hour),
-		},
+		AccountID:      "glm-cooling",
+		Email:          "cooling@example.com",
+		AccessToken:    "token-cooling",
+		ExpiresAt:      time.Now().Add(time.Hour).UnixMilli(),
+		Status:         "active",
+		ModelCooldowns: map[string]time.Time{},
+	}
+	for _, model := range freeModelChain {
+		account.ModelCooldowns[model] = time.Now().Add(time.Hour)
 	}
 	pool = &AccountPool{Accounts: []*Account{account}}
 	setProxyConfig(defaultProxyConfig())
@@ -854,8 +854,8 @@ func TestHandleResponsesFreeReturnsTooManyRequestsWhenBothPoolsUnavailable(t *te
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("response status = %d, want %d: %s", recorder.Code, http.StatusTooManyRequests, recorder.Body.String())
 	}
-	if calls != 2 {
-		t.Fatalf("upstream calls = %d, want one attempt per model", calls)
+	if calls != len(freeModelChain) {
+		t.Fatalf("upstream calls = %d, want one attempt per model (%d)", calls, len(freeModelChain))
 	}
 
 	requestLogsMu.Lock()
@@ -863,7 +863,8 @@ func TestHandleResponsesFreeReturnsTooManyRequestsWhenBothPoolsUnavailable(t *te
 	if len(requestLogs) != 1 {
 		t.Fatalf("request log count = %d, want 1", len(requestLogs))
 	}
-	if requestLogs[0].Model != freeModelFallback {
-		t.Fatalf("request log model = %q, want %q", requestLogs[0].Model, freeModelFallback)
+	lastModel := freeModelChain[len(freeModelChain)-1]
+	if requestLogs[0].Model != lastModel {
+		t.Fatalf("request log model = %q, want %q", requestLogs[0].Model, lastModel)
 	}
 }
