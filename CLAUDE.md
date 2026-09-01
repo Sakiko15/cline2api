@@ -18,7 +18,7 @@ docker compose up -d                 # Docker run
 ```
 
 - CLI and desktop are the **same package** split by build tags: `main.go` (`//go:build !desktop`) vs `desktop_main.go` (`//go:build desktop`). Plain `go build .` never compiles desktop code; desktop needs `-tags "desktop production"` (done by `desktop/build.sh`) and cannot cross-compile.
-- CI (`.github/workflows/build.yml`) only runs on `v*` tags / workflow_dispatch — no PR/push CI, no lint/test job (only a binary `-selfcheck` smoke step), no linter or formatter config. `appVersion` is injected via `-ldflags "-X main.appVersion=..."`.
+- CI: `build.yml` (desktop binaries) runs only on `v*` tags / workflow_dispatch — no PR/push CI, no lint/test job (only a binary `-selfcheck` smoke step), no linter or formatter config. `docker.yml` (GHCR multi-arch image `ghcr.io/sakiko15/cline2api`, linux/amd64+arm64) runs on `v*` tags + **main pushes (tagged `edge` + `sha-*`)** + workflow_dispatch; `latest` is only updated by tag pushes. `appVersion` is injected via `-ldflags "-X main.appVersion=..."`.
 - Names disagree: module `cline-go-proxy`, repo `cline2api`, binary `cline-proxy`, desktop output `cline-proxy-desktop`.
 
 ## Architecture
