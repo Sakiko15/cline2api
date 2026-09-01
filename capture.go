@@ -20,9 +20,11 @@ var (
 )
 
 func init() {
-	exe, _ := os.Executable()
-	captureLogDir = filepath.Join(filepath.Dir(exe), "capture-logs")
+	// 跟随数据目录回退链（exe → cwd → ~/.cline2api），不再固定 exe 目录（P2-15）
+	captureLogDir = filepath.Join(resolveDataDir(), "capture-logs")
 }
+
+const captureCredentialWarning = "注意: capture-logs/ 与上方输出包含明文凭证（access/refresh token），用完请立即删除整个目录"
 
 type CaptureEntry struct {
 	Step        int               `json:"step"`
@@ -163,10 +165,10 @@ func captureRequest(name, method, rawURL, reqBody string, headers map[string]str
 var allEntries []*CaptureEntry
 
 func saveCaptureEntry(entry *CaptureEntry) {
-	os.MkdirAll(captureLogDir, 0755)
+	os.MkdirAll(captureLogDir, 0700)
 	filename := filepath.Join(captureLogDir, fmt.Sprintf("step-%02d-%s.json", entry.Step, sanitizeFilename(entry.Name)))
 	data, _ := json.MarshalIndent(entry, "", "  ")
-	os.WriteFile(filename, data, 0644)
+	os.WriteFile(filename, data, 0600) // 内容含凭证，仅属主可读（P2-5）
 
 	// Also append to full log
 	fullLog := filepath.Join(captureLogDir, "full-capture.json")
@@ -179,7 +181,7 @@ func saveCaptureEntry(entry *CaptureEntry) {
 	}
 	entries = append(entries, entry)
 	finalData, _ := json.MarshalIndent(entries, "", "  ")
-	os.WriteFile(fullLog, finalData, 0644)
+	os.WriteFile(fullLog, finalData, 0600)
 }
 
 func sanitizeFilename(s string) string {
@@ -201,8 +203,10 @@ func doFullCapture() error {
 	fmt.Println("╚" + strings.Repeat("═", 70) + "╝")
 	fmt.Printf("  日志目录: %s\n", captureLogDir)
 	fmt.Println("")
+	fmt.Println("  ⚠ " + captureCredentialWarning)
+	fmt.Println("")
 
-	os.MkdirAll(captureLogDir, 0755)
+	os.MkdirAll(captureLogDir, 0700)
 	captureIndex = 0
 
 	// ================================================================
@@ -497,6 +501,8 @@ func doFullCapture() error {
 	fmt.Println("")
 	fmt.Println("  Cline User Email:")
 	fmt.Println("  " + getEmail(clineRegResp.Data.UserInfo))
+	fmt.Println("")
+	fmt.Println("  ⚠ " + captureCredentialWarning)
 	fmt.Println(strings.Repeat("╬", 72))
 
 	return nil

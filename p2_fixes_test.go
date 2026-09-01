@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -740,5 +741,42 @@ func TestChatBodyTooLarge(t *testing.T) {
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status = %d, want 413 (body=%s)", resp.StatusCode, body)
+	}
+}
+
+// ---- P2-15 数据目录探测回退 ----
+
+func TestDirWritable(t *testing.T) {
+	dir := t.TempDir()
+	if !dirWritable(dir) {
+		t.Fatal("temp dir should be writable")
+	}
+	if dirWritable(filepath.Join(dir, "missing-sub")) {
+		t.Fatal("nonexistent dir should not be reported writable")
+	}
+}
+
+func TestProbeDataDirCreatesWithPerms(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "newdir")
+	got, ok := probeDataDir(dir)
+	if !ok || got != dir {
+		t.Fatalf("probeDataDir = %q ok=%v, want created and selected", got, ok)
+	}
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0700 {
+			t.Fatalf("dir mode = %v, want 0700", fi.Mode().Perm())
+		}
+	}
+}
+
+func TestResolveDataDirStable(t *testing.T) {
+	a := resolveDataDir()
+	b := resolveDataDir()
+	if a == "" || a != b {
+		t.Fatalf("resolveDataDir should be stable, got %q then %q", a, b)
 	}
 }

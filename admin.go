@@ -1097,6 +1097,8 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		"headers":      cfg.Headers,
 		"localIPs":     detectLocalIPs(),
 		"hasPassword":  loadPool().AdminPasswordHash != "",
+		"dataDir":         resolveDataDir(),
+		"dataDirWritable": dirWritable(resolveDataDir()),
 	}})
 }
 

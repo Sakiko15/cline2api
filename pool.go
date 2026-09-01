@@ -46,12 +46,73 @@ func resolveDataPath(filename string) string {
 			return p
 		}
 	}
-	// 回退：exe 目录（首次运行在此创建）
-	if exe, err := os.Executable(); err == nil {
-		return filepath.Join(filepath.Dir(exe), filename)
+	// 回退：启动时探测出的可写数据目录（exe 目录 → cwd → ~/.cline2api，P2-15）
+	return filepath.Join(resolveDataDir(), filename)
+}
+
+// dirWritable 通过 CreateTemp 探测目录可写性。
+func dirWritable(dir string) bool {
+	f, err := os.CreateTemp(dir, ".cline-writability-*")
+	if err != nil {
+		return false
 	}
-	pwd, _ := os.Getwd()
-	return filepath.Join(pwd, filename)
+	name := f.Name()
+	f.Close()
+	os.Remove(name)
+	return true
+}
+
+// probeDataDir 确保目录存在（0700）且可写。
+func probeDataDir(dir string) (string, bool) {
+	if dir == "" {
+		return "", false
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", false
+	}
+	if !dirWritable(dir) {
+		return "", false
+	}
+	return dir, true
+}
+
+// resolveDataDir 启动时确定数据目录（结果缓存）：exe 目录 → cwd → ~/.cline2api
+// （允许创建），逐个探测可写性；全部不可写时告警并回退 exe 目录（P2-15）。
+// resolveDataPath 仅在三个候选路径都找不到既有文件时才会走到这里。
+var (
+	resolveDataDirOnce sync.Once
+	resolvedDataDir    string
+)
+
+func resolveDataDir() string {
+	resolveDataDirOnce.Do(func() {
+		var candidates []string
+		if exe, err := os.Executable(); err == nil {
+			candidates = append(candidates, filepath.Dir(exe))
+		}
+		if pwd, err := os.Getwd(); err == nil {
+			candidates = append(candidates, pwd)
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			candidates = append(candidates, filepath.Join(home, ".cline2api"))
+		}
+		for i, dir := range candidates {
+			if d, ok := probeDataDir(dir); ok {
+				resolvedDataDir = d
+				if i > 0 {
+					log.Printf("data dir: using %s (earlier candidate dirs are not writable)", d)
+				}
+				return
+			}
+		}
+		if exe, err := os.Executable(); err == nil {
+			resolvedDataDir = filepath.Dir(exe)
+		} else {
+			resolvedDataDir, _ = os.Getwd()
+		}
+		log.Printf("WARNING: no writable data dir among candidates; falling back to %s (writes may fail)", resolvedDataDir)
+	})
+	return resolvedDataDir
 }
 
 func loadPool() *AccountPool {

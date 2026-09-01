@@ -585,6 +585,7 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
         <div class="field"><label>当前地址</label><input type="text" id="settingAddr" disabled></div>
       </div>
       <div id="listenWarn" class="warn-box" style="display:none">⚠️ 当前监听非本机回环地址（0.0.0.0 或局域网 IP），管理后台无鉴权，局域网内任何设备都可访问。请确认网络环境安全，或配合防火墙限制端口。</div>
+      <div id="dataDirWarn" class="warn-box" style="display:none">⚠️ 当前数据目录不可写，配置/账号状态可能无法保存。请检查目录权限，或以可写方式运行程序。</div>
       <div id="localIPsRow" class="form-row" style="display:none">
         <div class="field" style="flex:1">
           <label>本机 IP（局域网访问地址）</label>
@@ -2065,6 +2066,8 @@ async function loadConfig() {
     const h = c.host || '';
     const safeHosts = ['', '127.0.0.1', 'localhost', '::1'];
     _('listenWarn').style.display = (safeHosts.indexOf(h) === -1) ? '' : 'none';
+    // 数据目录不可写 → 持久告警（配置/账号状态保存会失败）
+    _('dataDirWarn').style.display = (c.dataDirWritable === false) ? '' : 'none';
     if (c.headers) {
       const tbody = _('headersTableBody');
       tbody.innerHTML = Object.entries(c.headers).map(([k, v]) =>
