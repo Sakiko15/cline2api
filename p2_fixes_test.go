@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -778,5 +779,38 @@ func TestResolveDataDirStable(t *testing.T) {
 	b := resolveDataDir()
 	if a == "" || a != b {
 		t.Fatalf("resolveDataDir should be stable, got %q then %q", a, b)
+	}
+}
+
+// ---- P2-17 端口占用拒绝启动 ----
+
+func TestEnsurePortFreeRefusesOccupied(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	defer ln.Close()
+
+	err = ensurePortFree("127.0.0.1", port)
+	if err == nil {
+		t.Fatal("occupied port should be refused")
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(port)) {
+		t.Fatalf("error should mention the port, got %q", err)
+	}
+	if !strings.Contains(err.Error(), "-port") {
+		t.Fatalf("error should hint at -port flag, got %q", err)
+	}
+
+	// 空闲端口应放行
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port2 := ln2.Addr().(*net.TCPAddr).Port
+	ln2.Close()
+	if err := ensurePortFree("127.0.0.1", port2); err != nil {
+		t.Fatalf("free port should pass, got %v", err)
 	}
 }

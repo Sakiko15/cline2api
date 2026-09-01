@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-var execCommand = exec.Command
+var execCommandContext = exec.CommandContext
 
 // 请求体限额（var 便于测试收缩）：聊天类端点 32MB，管理面 1MB（P2-8）。
 var (

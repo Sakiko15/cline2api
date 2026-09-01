@@ -281,7 +281,10 @@ func startProxy(host string, port int) error {
 	}
 	startCompactCleanup()
 
-	freePort(port)
+	// 端口被占用时拒绝启动并指明占用进程（P2-17，替代旧的 PowerShell 强杀）
+	if err := ensurePortFree(host, port); err != nil {
+		return err
+	}
 
 	mux := http.NewServeMux()
 
@@ -2291,17 +2294,29 @@ func getNested(obj map[string]any, keys ...any) any {
 	return current
 }
 
-func freePort(port int) {
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+// describePortOwner 尽力找出占用本机端口的监听进程名（Windows，3s 超时），失败返回空串。
+func describePortOwner(port int) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := execCommandContext(ctx, "powershell", "-NoProfile", "-Command",
+		fmt.Sprintf(`(Get-NetTCPConnection -LocalPort %d -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess | ForEach-Object { (Get-Process -Id $_ -ErrorAction SilentlyContinue).ProcessName })`, port)).Output()
 	if err != nil {
-		return // port is free
+		return ""
 	}
-	conn.Close()
+	return strings.TrimSpace(string(out))
+}
 
-	// Try to kill the process using the port
-	cmd := execCommand("powershell", "-Command",
-		fmt.Sprintf(`$p=Get-NetTCPConnection -LocalPort %d -ErrorAction SilentlyContinue; if($p){Stop-Process -Id $p.OwningProcess -Force}`, port))
-	_ = cmd.Run()
-	time.Sleep(500 * time.Millisecond)
+// ensurePortFree 探测监听地址是否可绑定；被占用时返回含占用进程名的明确错误。
+// 不再强杀占用进程（P2-17）：PowerShell 强杀可能误伤无关服务，改为拒绝启动。
+func ensurePortFree(host string, port int) error {
+	addr := net.JoinHostPort(host, strconv.Itoa(port)) // host 为空 = 所有网卡，与实际 Listen 一致
+	ln, err := net.Listen("tcp", addr)
+	if err == nil {
+		ln.Close()
+		return nil
+	}
+	if owner := describePortOwner(port); owner != "" {
+		return fmt.Errorf("port %d is already in use by process %q (%s); stop that process or start with a different -port", port, owner, err)
+	}
+	return fmt.Errorf("port %d is already in use (%s); stop the occupying process or start with a different -port", port, err)
 }
