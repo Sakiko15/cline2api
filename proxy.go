@@ -1319,8 +1319,8 @@ type anthropicReq struct {
 	Messages    []anthropicMsg  `json:"messages"`
 	System      json.RawMessage `json:"system,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	TopP        float64         `json:"top_p,omitempty"`
+	Temperature *float64        `json:"temperature,omitempty"` // 指针区分「未设置」与显式 0（P1-13）
+	TopP        *float64        `json:"top_p,omitempty"`
 	TopK        int             `json:"top_k,omitempty"`
 	Stop        json.RawMessage `json:"stop_sequences,omitempty"`
 	Tools       json.RawMessage `json:"tools,omitempty"`
@@ -1393,6 +1393,32 @@ func anthropicToolsToOpenAI(tools []any) []any {
 	return out
 }
 
+// mapAnthropicToolChoice 将 Anthropic 的 tool_choice 形状映射为 OpenAI 形状（P1-13）：
+// {"type":"auto"}→"auto"，{"type":"any"}→"required"，{"type":"none"}→"none"，
+// {"type":"tool","name":x}→{"type":"function","function":{"name":x}}。
+func mapAnthropicToolChoice(raw json.RawMessage) any {
+	var tc struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &tc); err != nil {
+		return "auto"
+	}
+	switch tc.Type {
+	case "any":
+		return "required"
+	case "none":
+		return "none"
+	case "tool":
+		return map[string]any{
+			"type":     "function",
+			"function": map[string]any{"name": tc.Name},
+		}
+	default: // "auto" 及未知值
+		return "auto"
+	}
+}
+
 func anthropicToOpenAI(req anthropicReq) map[string]any {
 	openAI := map[string]any{
 		"model":      req.Model,
@@ -1400,11 +1426,12 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 		"stream":     req.Stream,
 		"messages":   []any{},
 	}
-	if req.Temperature != 0 {
-		openAI["temperature"] = req.Temperature
+	// Temperature/TopP 为指针：nil=未设置，显式 0 也要透传（P1-13）
+	if req.Temperature != nil {
+		openAI["temperature"] = *req.Temperature
 	}
-	if req.TopP != 0 {
-		openAI["top_p"] = req.TopP
+	if req.TopP != nil {
+		openAI["top_p"] = *req.TopP
 	}
 	// Convert Anthropic tools to OpenAI format
 	if req.Tools != nil {
@@ -1413,8 +1440,15 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 			openAI["tools"] = anthropicToolsToOpenAI(toolsArr)
 		}
 	}
+	// stop_sequences → stop（P1-13：此前解析后从未转发）
+	if len(req.Stop) > 0 {
+		var stops []string
+		if err := json.Unmarshal(req.Stop, &stops); err == nil && len(stops) > 0 {
+			openAI["stop"] = stops
+		}
+	}
 	if req.ToolChoice != nil {
-		openAI["tool_choice"] = req.ToolChoice
+		openAI["tool_choice"] = mapAnthropicToolChoice(req.ToolChoice)
 	}
 
 	msgs := []any{}
@@ -1436,7 +1470,7 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 		case []any:
 			textParts := []string{}
 			var toolCalls []any
-			var toolResult *map[string]any
+			var toolResults []any // 并行工具调用可有多个 tool_result，全部保留（P1-13）
 
 			for _, block := range c {
 				if b, ok := block.(map[string]any); ok {
@@ -1466,12 +1500,11 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 						}
 						toolCalls = append(toolCalls, tc)
 					case "tool_result":
-						tr := map[string]any{
+						toolResults = append(toolResults, map[string]any{
 							"role":         "tool",
 							"content":      b["content"],
 							"tool_call_id": b["tool_use_id"],
-						}
-						toolResult = &tr
+						})
 					}
 				}
 			}
@@ -1483,8 +1516,8 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 					"tool_calls": toolCalls,
 				}
 				msgs = append(msgs, msg)
-			} else if m.Role == "user" && toolResult != nil {
-				msgs = append(msgs, *toolResult)
+			} else if m.Role == "user" && len(toolResults) > 0 {
+				msgs = append(msgs, toolResults...)
 			} else {
 				content := strings.Join(textParts, "\n")
 				msgs = append(msgs, map[string]any{"role": m.Role, "content": content})
