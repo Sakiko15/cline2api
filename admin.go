@@ -42,9 +42,23 @@ type apiResponse struct {
 }
 
 func writeAPI(w http.ResponseWriter, status int, resp apiResponse) {
+	setAdminSecurityHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(resp)
+}
+
+// setAdminSecurityHeaders 为管理面响应加安全头（P3-7）：管理页是内联
+// script/style 的单文件（无外部资源），CSP 取 default-src 'none' + 内联放行。
+func setAdminSecurityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Cache-Control", "no-store")
+	h.Set("Content-Security-Policy",
+		"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "+
+			"connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 }
 
 // readAdminBody 限额读取管理面请求体（默认 1MB）；读取失败或超限时已写好响应，
@@ -442,6 +456,10 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 			writeAPI(w, http.StatusForbidden, apiResponse{Error: tAPI(r, "admin_csrf_blocked")})
 			return
 		}
+		if r.Method != "POST" { // P3-5：GET 顶层导航即可清会话，必须 POST
+			writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+			return
+		}
 		if c, err := r.Cookie(adminSessionCookie); err == nil {
 			adminSessionsMu.Lock()
 			delete(adminSessions, c.Value)
@@ -480,6 +498,7 @@ func handleAdminPassword(w http.ResponseWriter, r *http.Request) {
 
 func adminStaticHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/admin/" || r.URL.Path == "/admin" {
+		setAdminSecurityHeaders(w)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(adminHTML))
@@ -883,9 +902,10 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /admin/api/accounts/export — 导出账号为批量导入兼容格式
+// POST /admin/api/accounts/export — 导出账号为批量导入兼容格式。
+// POST-only（P3-5）：顶层导航即可触发的 GET 在 SameSite=Lax 下不受 CSRF 保护。
 func handleExportAccounts(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
+	if r.Method != "POST" {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
@@ -905,6 +925,7 @@ func handleExportAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	setAdminSecurityHeaders(w)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="cline-accounts-export.json"`)
 	json.NewEncoder(w).Encode(map[string]any{
@@ -913,18 +934,34 @@ func handleExportAccounts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /admin/api/open-external?url=... — 用系统默认浏览器打开外部链接
+// POST /admin/api/open-external  body: {url} — 用系统默认浏览器打开外部链接。
+// POST-only（P3-5）：GET 顶层导航即可触发浏览器弹窗骚扰。
 func handleOpenExternal(w http.ResponseWriter, r *http.Request) {
-	url := r.URL.Query().Get("url")
-		if url == "" {
-			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "url_required")})
-			return
-		}
-		// 仅允许 http/https，防止任意命令执行
-		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "url_http_only")})
-			return
-		}
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
+		return
+	}
+	body, ok := readAdminBody(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	url := req.URL
+	if url == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "url_required")})
+		return
+	}
+	// 仅允许 http/https，防止任意命令执行
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "url_http_only")})
+		return
+	}
 	if err := openBrowser(url); err != nil {
 		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: err.Error()})
 		return

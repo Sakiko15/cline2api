@@ -344,6 +344,90 @@ func TestAdminLockoutExpires(t *testing.T) {
 	t.Fatalf("lockout did not expire within 2s")
 }
 
+// ---- P3-5/P3-7：方法校验与管理面安全头 ----
+
+func TestAdminSecurityHeaders(t *testing.T) {
+	// 静态页
+	r := httptest.NewRequest("GET", "http://localhost:3457/admin/", nil)
+	rec := httptest.NewRecorder()
+	adminStaticHandler(rec, r)
+	for _, h := range []string{"X-Content-Type-Options", "X-Frame-Options", "Content-Security-Policy"} {
+		if rec.Header().Get(h) == "" {
+			t.Fatalf("admin page response missing %s", h)
+		}
+	}
+
+	// JSON API（经 writeAPI）
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+	pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{}}
+	r = httptest.NewRequest("GET", "http://localhost:3457/admin/api/accounts", nil)
+	rec = httptest.NewRecorder()
+	handleAdminAccounts(rec, r)
+	if rec.Header().Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("admin API response missing X-Frame-Options DENY")
+	}
+	if rec.Header().Get("Content-Security-Policy") == "" {
+		t.Fatalf("admin API response missing CSP")
+	}
+}
+
+func TestAdminLogoutPostOnly(t *testing.T) {
+	r := httptest.NewRequest("GET", "http://localhost:3457/admin/api/logout", nil)
+	rec := httptest.NewRecorder()
+	handleAdminLogout(rec, r)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET logout = %d, want 405", rec.Code)
+	}
+}
+
+func TestExportAccountsPostOnly(t *testing.T) {
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+	pool = &AccountPool{
+		Accounts: []*Account{{AccountID: "a", Email: "e@example.com", RefreshToken: "rt"}},
+		Keys:     []string{}, Models: []Model{},
+	}
+
+	r := httptest.NewRequest("GET", "http://localhost:3457/admin/api/accounts/export", nil)
+	rec := httptest.NewRecorder()
+	handleExportAccounts(rec, r)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET export = %d, want 405", rec.Code)
+	}
+
+	r = httptest.NewRequest("POST", "http://localhost:3457/admin/api/accounts/export", nil)
+	rec = httptest.NewRecorder()
+	handleExportAccounts(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST export = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "rt") {
+		t.Fatalf("POST export body missing tokens")
+	}
+}
+
+func TestOpenExternalPostOnly(t *testing.T) {
+	r := httptest.NewRequest("GET", "http://localhost:3457/admin/api/open-external?url=https://example.com", nil)
+	rec := httptest.NewRecorder()
+	handleOpenExternal(rec, r)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET open-external = %d, want 405", rec.Code)
+	}
+
+	// POST 非法 scheme → 400（不真开浏览器）
+	r = httptest.NewRequest("POST", "http://localhost:3457/admin/api/open-external",
+		strings.NewReader(`{"url":"file:///etc/passwd"}`))
+	r.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	handleOpenExternal(rec, r)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST open-external file:// = %d, want 400", rec.Code)
+	}
+}
+
+// ---- P3-1（后半）：请求日志防抖落盘 ----
+
 func TestAppendRequestLogDeferredPersist(t *testing.T) {
 	oldDelay := requestLogsDebouncer.delay
 	oldLogs := requestLogs

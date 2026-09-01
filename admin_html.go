@@ -1304,7 +1304,7 @@ async function submitLogin() {
 // 用系统默认浏览器打开外部链接（桌面 WebView 内导航不会跳外部浏览器，需走后端）
 async function openExternal(url) {
   try {
-    await api('GET', '/open-external?url=' + encodeURIComponent(url));
+    await api('POST', '/open-external', { url });
     toast(t('已在系统浏览器中打开'), 'success');
   } catch (e) { toast(t('打开失败: ') + e.message, 'error'); }
 }
@@ -1598,7 +1598,7 @@ async function addByToken() {
 // ========== 导出账号 ==========
 async function exportAccounts() {
   try {
-    const res = await fetch(API + '/accounts/export');
+    const res = await fetch(API + '/accounts/export', { method: 'POST' });
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
