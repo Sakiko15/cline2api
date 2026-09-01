@@ -324,11 +324,13 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 						if errPayload, ok := obj["error"]; ok && errPayload != nil {
 							errBody, _ := json.Marshal(errPayload)
 							log.Printf("  upstream SSE error (responses): %s", truncate(string(errBody), 300))
+							// P3-10：客户端只收固定文案，上游原文仅入日志
 							s.event("response.failed", map[string]any{
 								"type": "response.failed",
 								"response": map[string]any{
 									"id": s.respID, "object": "response", "created_at": time.Now().Unix(),
-									"status": "failed", "model": s.model, "output": []any{}, "error": errPayload,
+									"status": "failed", "model": s.model, "output": []any{},
+									"error": map[string]any{"code": "upstream_error", "message": "invalid response from upstream"},
 								},
 							})
 							if reqLog != nil {
@@ -551,7 +553,8 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		var raw map[string]any
 		if err := json.NewDecoder(upResp.Body).Decode(&raw); err != nil {
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, "decode response: "+err.Error())
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			// P3-10：解码失败不回显上游响应体
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid response from upstream"})
 			return
 		}
 		out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))

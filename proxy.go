@@ -755,7 +755,34 @@ func retryAfterFor(err error) time.Duration {
 	return clampRetryWait(time.Until(parseCooldownUntil(msg)), time.Hour)
 }
 
+// upstreamClientMessage 计算 /v1 客户端可见的错误描述（P3-10）：只暴露状态码
+// 与本地固定文案，上游原文（可含账号 email、内部路径、上游响应体）仅保留在
+// 管理端请求日志。状态码映射仍由 upstreamErrorHTTPStatus 决定，互不影响。
+func upstreamClientMessage(err error) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "request canceled"
+	}
+	var zerr *zenAPIError
+	if errors.As(err, &zerr) {
+		return fmt.Sprintf("opencode upstream returned HTTP %d", zerr.statusCode)
+	}
+	if ferr, ok := err.(*freeModelUnavailableError); ok {
+		return ferr.message // 本地固定文案，非上游回显
+	}
+	var uerr *clineAccountUnavailableError
+	if errors.As(err, &uerr) { // 原文含账号 email，不外发
+		return "no account available for this request"
+	}
+	var aerr *clineAPIError
+	if errors.As(err, &aerr) {
+		return fmt.Sprintf("upstream returned HTTP %d", aerr.statusCode)
+	}
+	return "upstream request failed"
+}
+
 // writeUpstreamError 统一 /v1 错误响应：按上游状态映射状态码，429 回填 Retry-After。
+// 客户端 message 走 upstreamClientMessage 最小化回显（P3-10）；
+// Retry-After 仍从错误原文解析冷却文案（P1-8 语义保持）。
 func writeUpstreamError(w http.ResponseWriter, err error) {
 	status := upstreamErrorHTTPStatus(err)
 	if status == http.StatusTooManyRequests {
@@ -764,7 +791,7 @@ func writeUpstreamError(w http.ResponseWriter, err error) {
 		}
 	}
 	writeJSON(w, status, map[string]any{
-		"error": map[string]string{"message": err.Error(), "type": "api_error"},
+		"error": map[string]string{"message": upstreamClientMessage(err), "type": "api_error"},
 	})
 }
 
@@ -2034,7 +2061,8 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		if errPayload, ok := obj["error"]; ok {
 			errBody, _ := json.Marshal(errPayload)
 			log.Printf("  upstream SSE error: %s", string(errBody))
-			emit("error", map[string]any{"type": "error", "error": errPayload})
+			// P3-10：客户端只收固定文案，上游原文仅入日志与 streamErrMsg
+			emit("error", map[string]any{"type": "upstream_error", "message": "upstream returned an error during streaming"})
 			streamErr = true
 			streamErrMsg = truncate(string(errBody), 200)
 			break

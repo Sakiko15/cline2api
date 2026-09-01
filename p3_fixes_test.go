@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -721,5 +723,85 @@ func TestZenRandHexFallbackVaries(t *testing.T) {
 		if v := randIntn(7); v < 0 || v >= 7 {
 			t.Fatalf("randIntn degraded = %d, out of range [0,7)", v)
 		}
+	}
+}
+
+// ---- P3-10：/v1 错误回显最小化 ----
+
+func TestUpstreamClientMessage(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{&zenAPIError{statusCode: 503, message: "internal detail SECRET"}, "opencode upstream returned HTTP 503"},
+		{&clineAPIError{statusCode: 403, message: "SECRET body"}, "upstream returned HTTP 403"},
+		{&freeModelUnavailableError{message: "no eligible accounts available for free models"},
+			"no eligible accounts available for free models"},
+		{&clineAccountUnavailableError{err: fmt.Errorf("account a@b.c token failed: boom")},
+			"no account available for this request"},
+		{&clineAccountUnavailableError{err: fmt.Errorf("upstream request canceled: %w", context.Canceled)},
+			"request canceled"},
+		{fmt.Errorf("SECRET plain error"), "upstream request failed"},
+	}
+	for i, c := range cases {
+		if got := upstreamClientMessage(c.err); got != c.want {
+			t.Errorf("case %d: upstreamClientMessage = %q, want %q", i, got, c.want)
+		}
+	}
+}
+
+func TestWriteUpstreamErrorHidesUpstreamBody(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeUpstreamError(rec, &clineAPIError{statusCode: 403, message: "SECRET upstream body for HTTP 403"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "SECRET") {
+		t.Fatalf("client body must not contain upstream text: %s", body)
+	}
+	if !strings.Contains(body, "upstream returned HTTP 403") {
+		t.Fatalf("client body should carry generic status message: %s", body)
+	}
+
+	// Retry-After 仍从错误原文解析冷却文案（P1-8 语义保持），message 仍通用
+	rec = httptest.NewRecorder()
+	writeUpstreamError(rec, &clineAPIError{statusCode: 429, message: "Try again in 45m SECRET"})
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("429 with cooldown text must still set Retry-After")
+	}
+	if strings.Contains(rec.Body.String(), "SECRET") {
+		t.Fatalf("429 body must not leak upstream text: %s", rec.Body.String())
+	}
+}
+
+func TestSSEUpstreamErrorSanitized(t *testing.T) {
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"error\":{\"message\":\"SECRET account a@b.com quota exceeded\"}}\n\n")),
+		Header: make(http.Header),
+	}
+	rec := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "m"}
+	acc := &Account{AccountID: "a1", Email: "a@example.com", Status: "active"}
+
+	handleAnthropicStream(rec, upstream, acc, reqLog)
+
+	out := rec.Body.String()
+	if !strings.Contains(out, `"type":"upstream_error"`) {
+		t.Fatalf("SSE error payload should use fixed upstream_error type, got %s", out)
+	}
+	if !strings.Contains(out, "upstream returned an error during streaming") {
+		t.Fatalf("SSE error payload should carry fixed message, got %s", out)
+	}
+	if strings.Contains(out, "SECRET") || strings.Contains(out, "a@b.com") {
+		t.Fatalf("SSE error payload leaked upstream body: %s", out)
+	}
+	if !strings.Contains(rec.Body.String(), "event: error") {
+		t.Fatalf("should still emit an error event, got %s", out)
 	}
 }
