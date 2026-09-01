@@ -181,6 +181,8 @@ func quarantineFile(path string, cause error) {
 // savePoolLocked 在已持有 poolMu 的前提下持久化池（tmp+rename 原子写）。
 // Marshal 必须在锁内进行：否则与并发修改 ModelStats/ModelCooldowns 等映射产生
 // "concurrent map iteration and map write" 致命错误（进程直接退出，无法 recover）。
+// writePath 固定为 path+".tmp"（writeFileAtomic），同路径并发写会交错损坏——
+// 因此所有对 poolPath 的落盘（含 flushPoolDirty 后台协程）都必须在 poolMu 内串行。
 func savePoolLocked() {
 	data, err := json.MarshalIndent(pool, "", "  ")
 	if err != nil {
@@ -188,8 +190,43 @@ func savePoolLocked() {
 		return
 	}
 	if err := writeFileAtomic(poolPath, data, 0600); err != nil {
+		// 写失败保留脏标记，交给 flushPoolDirty 下轮重试（P3-1：同步写失败不再丢数据）
 		log.Printf("Failed to save accounts: %v", err)
+		return
 	}
+	poolDirty = false
+}
+
+// poolDirty 与 poolDebouncer 支撑高频路径（pick/用量/冷却）的防抖落盘（P3-1）：
+// 变更方置脏，后台 1s 内合并写一次；管理操作仍走 savePool 同步写。
+// poolDirty 只能在持有 poolMu 时读写。进程被强杀最多丢 1s 的用量/冷却/游标。
+var (
+	poolDirty     bool
+	poolDebouncer = newDebouncedFlush(time.Second, flushPoolDirty)
+)
+
+// markPoolDirtyLocked 已持有 poolMu 的高频路径使用（pick 等）。
+func markPoolDirtyLocked() {
+	poolDirty = true
+	poolDebouncer.schedule()
+}
+
+// markPoolDirty 未持锁路径使用。
+func markPoolDirty() {
+	poolMu.Lock()
+	markPoolDirtyLocked()
+	poolMu.Unlock()
+}
+
+// flushPoolDirty 由 poolDebouncer 触发：锁内读脏→清脏→落盘（与同步写串行，
+// 见 savePoolLocked 注释）。无变更时空转。
+func flushPoolDirty() {
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	if !poolDirty {
+		return
+	}
+	savePoolLocked()
 }
 
 // markAccount* 系列：账号状态字段的写操作必须持 poolMu——
@@ -203,8 +240,8 @@ func markAccountCooldown(acc *Account, until time.Time) {
 	poolMu.Lock()
 	acc.Status = "cooldown"
 	acc.CooldownUntil = until
+	markPoolDirtyLocked()
 	poolMu.Unlock()
-	savePool()
 }
 
 // markAccountExpired 将账号置为过期态（token 刷新被拒/二次 401）。
@@ -214,8 +251,8 @@ func markAccountExpired(acc *Account) {
 	}
 	poolMu.Lock()
 	acc.Status = "expired"
+	markPoolDirtyLocked()
 	poolMu.Unlock()
-	savePool()
 }
 
 // markAccountActive 将账号恢复为可用（重置/探活成功/刷新成功）。
@@ -225,8 +262,8 @@ func markAccountActive(acc *Account) {
 	}
 	poolMu.Lock()
 	acc.Status = "active"
+	markPoolDirtyLocked()
 	poolMu.Unlock()
-	savePool()
 }
 
 // markAccountUsed 记录一次成功使用（LastUsed/UsageCount），持锁自增。
@@ -237,8 +274,8 @@ func markAccountUsed(acc *Account) {
 	poolMu.Lock()
 	acc.LastUsed = time.Now()
 	acc.UsageCount++
+	markPoolDirtyLocked()
 	poolMu.Unlock()
-	savePool()
 }
 
 func addAccount(acc *Account) {
@@ -373,7 +410,7 @@ func pickAccountForModelWithFallback(model string, fallbackToActive bool) *Accou
 		acc = eligible[p.CurrentIdx]
 		p.CurrentIdx = (p.CurrentIdx + 1) % len(eligible)
 	}
-	savePoolLocked()
+	markPoolDirtyLocked()
 	return acc
 }
 
@@ -403,7 +440,7 @@ func pickAccountLocked(p *AccountPool) *Account {
 		acc = active[p.CurrentIdx]
 		p.CurrentIdx = (p.CurrentIdx + 1) % len(active)
 	}
-	savePoolLocked()
+	markPoolDirtyLocked()
 	return acc
 }
 

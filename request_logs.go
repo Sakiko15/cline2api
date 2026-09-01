@@ -96,7 +96,30 @@ func saveRequestLogsLocked() {
 	if err != nil {
 		return
 	}
-	_ = writeFileAtomic(requestLogsPath, data, 0600)
+	if err := writeFileAtomic(requestLogsPath, data, 0600); err != nil {
+		// 写失败保留脏标记，交给 flushRequestLogsDirty 下轮重试
+		return
+	}
+	requestLogsDirty = false
+}
+
+// requestLogsDirty 与防抖器支撑逐请求日志的合并落盘（P3-1/P3-14：此前每请求
+// 全量 sort + 重写 ≤5000 条）。只能在持有 requestLogsMu 时读写。
+var (
+	requestLogsDirty     bool
+	requestLogsDebouncer = newDebouncedFlush(time.Second, flushRequestLogsDirty)
+)
+
+// flushRequestLogsDirty 由 requestLogsDebouncer 触发：锁内 prune（排序+裁剪）+
+// 落盘，成功清脏。
+func flushRequestLogsDirty() {
+	requestLogsMu.Lock()
+	defer requestLogsMu.Unlock()
+	if !requestLogsDirty {
+		return
+	}
+	requestLogs = pruneRequestLogsLocked(requestLogs)
+	saveRequestLogsLocked()
 }
 
 func appendRequestLog(entry RequestLog) {
@@ -105,9 +128,9 @@ func appendRequestLog(entry RequestLog) {
 	}
 	requestLogsMu.Lock()
 	requestLogs = append(requestLogs, entry)
-	requestLogs = pruneRequestLogsLocked(requestLogs)
-	saveRequestLogsLocked()
+	requestLogsDirty = true
 	requestLogsMu.Unlock()
+	requestLogsDebouncer.schedule()
 }
 
 type requestLogPage struct {
@@ -155,6 +178,12 @@ func listRequestLogs(limit int, cursor string) (requestLogPage, error) {
 
 	requestLogsMu.Lock()
 	defer requestLogsMu.Unlock()
+
+	// 防抖落盘期间内存切片未排序/未裁剪；分页依赖降序，读取侧补一次 prune
+	// （幂等、不写盘不清脏，落盘由 flushRequestLogsDirty 收口）。
+	if requestLogsDirty {
+		requestLogs = pruneRequestLogsLocked(requestLogs)
+	}
 
 	result := make([]RequestLog, 0, limit)
 	var lastEntry RequestLog

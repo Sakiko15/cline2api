@@ -1186,8 +1186,8 @@ func recordTokenUsage(acc *Account, model string, usage tokenUsage) {
 		st.TotalTokens += usage.Total
 		st.CachedTokens += usage.Cached
 	}
+	markPoolDirtyLocked()
 	poolMu.Unlock()
-	savePool()
 }
 
 // isFreeModelID 判断模型是否为 free 计费（用于按模型统计和模型级冷却）。
@@ -1214,7 +1214,7 @@ func modelCooldownActive(acc *Account, model string) bool {
 	}
 	if time.Now().After(until) {
 		delete(acc.ModelCooldowns, model)
-		savePoolLocked()
+		markPoolDirtyLocked()
 		return false
 	}
 	return true
@@ -1231,8 +1231,8 @@ func setModelCooldown(acc *Account, model string, until time.Time) {
 		acc.ModelCooldowns = make(map[string]time.Time)
 	}
 	acc.ModelCooldowns[model] = until
+	markPoolDirtyLocked()
 	poolMu.Unlock()
-	savePool()
 	log.Printf("model cooldown: account=%s model=%s until=%s", truncateEmail(acc.Email), model, until.Format("15:04:05"))
 }
 
