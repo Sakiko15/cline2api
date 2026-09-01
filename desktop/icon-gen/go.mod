@@ -1,6 +1,6 @@
 module icon-gen
 
-go 1.25
+go 1.25.0
 
 require github.com/tc-hib/winres v0.3.1
 
