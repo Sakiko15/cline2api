@@ -1007,6 +1007,7 @@ const I18N = {
   '未知错误': 'Unknown error',
   '测试失败: ': 'Test failed: ',
   '正在测试全部账号，请稍候...': 'Testing all accounts, please wait...',
+  '确认测试全部账号？这会对每个账号发起一次真实请求。': 'Test all accounts? This sends a real request for each account.',
   '全部测试通过：': 'All tests passed: ',
   ' 个账号正常': ' accounts OK',
   '测试完成：': 'Tests finished: ',
@@ -1485,11 +1486,12 @@ async function testAccount(id, btn) {
 }
 
 async function testAllAccounts(btn) {
+  if (!confirm(t('确认测试全部账号？这会对每个账号发起一次真实请求。'))) return;
   const orig = btn ? btn.innerHTML : '';
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading"></span> ' + t('测试中...'); }
   toast(t('正在测试全部账号，请稍候...'), 'info');
   try {
-    const d = await api('POST', '/accounts/test', {});
+    const d = await api('POST', '/accounts/test', { all: true });
     const results = d.data.results || [];
     const ok = results.filter(r => r.ok).length;
     const fail = results.length - ok;

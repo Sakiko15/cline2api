@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -149,9 +151,13 @@ func decodeCursor(cursor string) (time.Time, string, error) {
 	if err != nil {
 		return time.Time{}, "", fmt.Errorf("invalid cursor")
 	}
-	var ts int64
-	var id string
-	if _, err := fmt.Sscanf(string(raw), "%d|%s", &ts, &id); err != nil || id == "" {
+	// P3-13：严格解析 ts|id（Sscanf 会静默吞掉尾部垃圾）
+	tsStr, id, ok := strings.Cut(string(raw), "|")
+	if !ok || id == "" {
+		return time.Time{}, "", fmt.Errorf("invalid cursor")
+	}
+	ts, err := strconv.ParseInt(tsStr, 10, 64)
+	if err != nil {
 		return time.Time{}, "", fmt.Errorf("invalid cursor")
 	}
 	return time.Unix(0, ts), id, nil

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -853,5 +854,80 @@ func TestEmailLogMaskedAndSingleLine(t *testing.T) {
 	// 短 email 原样（无需脱敏）但也单行化
 	if out := sanitizeLog(truncateEmail("ab@x.com\ninjected"), 64); strings.Contains(out, "\n") {
 		t.Fatalf("short email with newline must be sanitized, got %q", out)
+	}
+}
+
+// ---- P3-13：数值解析严格化 + account-test 显式目标 ----
+
+func TestDecodeCursorStrict(t *testing.T) {
+	// 合法 cursor 往返
+	cur := encodeCursor(RequestLog{StartedAt: time.Unix(0, 1234567890).UTC(), ID: "entry-1"})
+	ts, id, err := decodeCursor(cur)
+	if err != nil || id != "entry-1" {
+		t.Fatalf("decodeCursor(valid) = %v, %q, %v", ts, id, err)
+	}
+
+	// 尾部垃圾（Sscanf 时代会被静默接受）→ 拒绝
+	bad := base64.RawURLEncoding.EncodeToString([]byte("1234567890abc|entry-1"))
+	if _, _, err := decodeCursor(bad); err == nil {
+		t.Fatalf("cursor with garbage timestamp must be rejected")
+	}
+
+	// 缺分隔符 / 空 id → 拒绝
+	if _, _, err := decodeCursor(base64.RawURLEncoding.EncodeToString([]byte("1234567890"))); err == nil {
+		t.Fatalf("cursor without separator must be rejected")
+	}
+	if _, _, err := decodeCursor(base64.RawURLEncoding.EncodeToString([]byte("1234567890|"))); err == nil {
+		t.Fatalf("cursor with empty id must be rejected")
+	}
+}
+
+func TestAdminRequestLogsStrictLimit(t *testing.T) {
+	get := func(q string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "http://localhost:3457/admin/api/request-logs"+q, nil)
+		rec := httptest.NewRecorder()
+		handleAdminRequestLogs(rec, r)
+		return rec
+	}
+	// 尾部垃圾 → 400（此前 Sscanf 取前缀 50 放行）
+	if rec := get("?limit=50abc"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("limit=50abc = %d, want 400", rec.Code)
+	}
+	if rec := get("?limit=0"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("limit=0 = %d, want 400", rec.Code)
+	}
+	if rec := get("?limit=10"); rec.Code != http.StatusOK {
+		t.Fatalf("limit=10 = %d, want 200", rec.Code)
+	}
+}
+
+func TestAdminAccountTestRequiresExplicitTarget(t *testing.T) {
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+	pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{}}
+
+	post := func(body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "http://localhost:3457/admin/api/accounts/test", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handleAdminAccountTest(rec, r)
+		return rec
+	}
+
+	// 空 body（旧行为：全池测试）→ 400
+	if rec := post(`{}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty body = %d, want 400", rec.Code)
+	}
+	// 非法 JSON → 400（此前被忽略）
+	if rec := post(`{bad json`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed JSON = %d, want 400", rec.Code)
+	}
+	// 显式 all:true → 200（空池 results 为空）
+	if rec := post(`{"all":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("all=true = %d, want 200", rec.Code)
+	}
+	// 指定不存在账号 → 404
+	if rec := post(`{"accountId":"nope"}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown accountId = %d, want 404", rec.Code)
 	}
 }

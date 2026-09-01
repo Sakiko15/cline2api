@@ -1166,8 +1166,16 @@ func handleAdminAccountTest(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		AccountID string `json:"accountId"`
+		All       bool   `json:"all"`
 	}
-	_ = json.Unmarshal(body, &req)
+	if err := json.Unmarshal(body, &req); err != nil { // P3-13：解析失败不再忽略
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
+		return
+	}
+	if req.AccountID == "" && !req.All { // P3-13：全池探活必须显式声明，防空 body 误触发全量请求
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "test_target_required")})
+		return
+	}
 
 	p := loadPool()
 	var targets []*Account
@@ -1675,8 +1683,8 @@ func handleAdminRequestLogs(w http.ResponseWriter, r *http.Request) {
 
 	limit := requestLogDefaultLimit
 	if v := r.URL.Query().Get("limit"); v != "" {
-		var n int
-		if _, err := fmt.Sscanf(v, "%d", &n); err != nil || n <= 0 {
+		n, err := strconv.Atoi(v) // P3-13：严格解析，"50abc" 类尾部垃圾整体拒绝
+		if err != nil || n <= 0 {
 				writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_limit")})
 			return
 		}

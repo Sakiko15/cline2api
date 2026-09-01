@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -393,14 +394,14 @@ func isRateLimited(status int, body string) bool {
 }
 
 // parseRetryAfter 解析 Retry-After 响应头（秒数或 HTTP 日期）；解析失败返回 0。
+// P3-13：秒数严格整体解析（Sscanf 会把 "30x" 当 30）。
 func parseRetryAfter(h string) time.Duration {
 	h = strings.TrimSpace(h)
 	if h == "" {
 		return 0
 	}
-	var secs int
-	if _, err := fmt.Sscanf(h, "%d", &secs); err == nil && secs > 0 {
-		return time.Duration(secs) * time.Second
+	if n, err := strconv.Atoi(h); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
 	}
 	if t, err := http.ParseTime(h); err == nil {
 		d := time.Until(t)

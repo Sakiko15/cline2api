@@ -69,6 +69,10 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "内部错误，请稍后再试",
 		localeEN: "Internal error, try again later",
 	},
+	"test_target_required": {
+		localeZH: "全池测试需显式确认，请传 {\"all\":true}",
+		localeEN: `Pool-wide test requires explicit confirmation: {"all":true}`,
+	},
 	"login_ok": {
 		localeZH: "登录成功",
 		localeEN: "Signed in",
