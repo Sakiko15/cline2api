@@ -685,7 +685,7 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	addAccount(acc)
-	log.Printf("Account added via API: %s", req.Email)
+	log.Printf("Account added via API: %s", sanitizeLog(truncateEmail(req.Email), 64))
 
 		writeAPI(w, http.StatusOK, apiResponse{
 			Success: true,
@@ -813,7 +813,7 @@ func handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		state.Success = true
 		state.Email = email
 		oauthSessionsMu.Unlock()
-		log.Printf("OAuth account added: %s", email)
+		log.Printf("OAuth account added: %s", sanitizeLog(truncateEmail(email), 64))
 	}()
 
 	writeAPI(w, http.StatusOK, apiResponse{
@@ -1094,7 +1094,7 @@ func handleAdminRefreshAll(w http.ResponseWriter, r *http.Request) {
 	poolMu.Unlock()
 	for _, a := range accs {
 		if err := refreshAccountToken(a); err != nil {
-			log.Printf("Refresh failed for %s: %v", a.Email, err)
+			log.Printf("Refresh failed for %s: %v", sanitizeLog(truncateEmail(a.Email), 64), sanitizeLog(err.Error(), 256))
 		}
 	}
 		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "tokens_refreshed")})

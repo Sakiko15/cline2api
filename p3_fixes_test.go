@@ -805,3 +805,53 @@ func TestSSEUpstreamErrorSanitized(t *testing.T) {
 		t.Fatalf("should still emit an error event, got %s", out)
 	}
 }
+
+// ---- P3-12：日志注入净化与 email 脱敏 ----
+
+func TestSanitizeLog(t *testing.T) {
+	cases := []struct {
+		in   string
+		max  int
+		want string
+	}{
+		{"normal-model", 128, "normal-model"},
+		{"line1\nline2", 128, "line1\\nline2"},
+		{"a\rb", 128, "a\\rb"},
+		{"x\x01y\x7fz", 128, "x\\x01y\\x7fz"},
+		{"tab\there", 128, "tab\\there"},
+		{"模型\n名", 128, "模型\\n名"},
+		{"", 128, ""},
+		{"abcdefgh", 4, "abcd..."},
+	}
+	for i, c := range cases {
+		if got := sanitizeLog(c.in, c.max); got != c.want {
+			t.Errorf("case %d: sanitizeLog(%q, %d) = %q, want %q", i, c.in, c.max, got, c.want)
+		}
+	}
+	// 伪造日志行攻击被单行化
+	injected := "model\n2026/09/01 00:00:00 FAKE LOG LINE injected"
+	out := sanitizeLog(injected, 128)
+	if strings.Contains(out, "\n") {
+		t.Fatalf("sanitizeLog must keep output single-line, got %q", out)
+	}
+	if !strings.Contains(out, "\\n") {
+		t.Fatalf("newline should be visible-escaped, got %q", out)
+	}
+}
+
+func TestEmailLogMaskedAndSingleLine(t *testing.T) {
+	// truncateEmail 脱敏 + sanitizeLog 单行化组合
+	in := "a@exa\nFAKE\rLINE@mple.com"
+	out := sanitizeLog(truncateEmail(in), 64)
+	if strings.ContainsAny(out, "\n\r") {
+		t.Fatalf("email log field must be single-line, got %q", out)
+	}
+	if strings.Contains(out, "LINE") && !strings.Contains(out, "\\r") {
+		t.Fatalf("control chars should be escaped, got %q", out)
+	}
+
+	// 短 email 原样（无需脱敏）但也单行化
+	if out := sanitizeLog(truncateEmail("ab@x.com\ninjected"), 64); strings.Contains(out, "\n") {
+		t.Fatalf("short email with newline must be sanitized, got %q", out)
+	}
+}

@@ -108,6 +108,31 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// sanitizeLog 净化日志字段（P3-12）：剥除换行与控制字符防日志注入（伪造日志行），
+// 限长防刷屏；控制字符以可见转义呈现，保持单行输出。用于 model 串与 email 等
+// 客户端/上游可控的日志入参。
+func sanitizeLog(s string, max int) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString("\\n")
+		case r == '\r':
+			b.WriteString("\\r")
+		case r == '\t':
+			b.WriteString("\\t")
+		case r < 0x20 || r == 0x7f:
+			b.WriteString(fmt.Sprintf("\\x%02x", r))
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return truncate(b.String(), max)
+}
+
 func runCommand(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	return cmd.Start()

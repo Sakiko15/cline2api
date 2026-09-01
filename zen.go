@@ -621,7 +621,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 			}
 		}
 		log.Printf("  zen upstream: model=%v stream=%v msgs=%d via=%s attempt=%d session=%s",
-			bodyParamsModel(params), stream, getMsgCount(params), describeZenProxy(), attempt+1, truncate(sess, 24))
+			sanitizeLog(bodyParamsModel(params), 128), stream, getMsgCount(params), describeZenProxy(), attempt+1, sanitizeLog(truncate(sess, 24), 32))
 
 		resp, err := getZenHTTPClient().Do(req)
 		if err != nil {

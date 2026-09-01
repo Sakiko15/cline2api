@@ -277,7 +277,7 @@ func startProxy(host string, port int) error {
 			// Try to pre-warm tokens
 			if a.AccessToken == "" || time.Now().UnixMilli() >= a.ExpiresAt {
 				if err := refreshAccountToken(a); err != nil {
-					log.Printf("  Pre-warm failed for %s: %v", a.Email, err)
+					log.Printf("  Pre-warm failed for %s: %v", sanitizeLog(truncateEmail(a.Email), 64), sanitizeLog(err.Error(), 256))
 					continue
 				}
 			}
@@ -418,7 +418,7 @@ func startProxy(host string, port int) error {
 			}
 		}
 		model, _ := params["model"].(string)
-		log.Printf("  client: stream=%v tools=%d model=%s", isStream, toolCount, model)
+		log.Printf("  client: stream=%v tools=%d model=%s", isStream, toolCount, sanitizeLog(model, 128))
 
 		reqLog := RequestLog{StartedAt: time.Now(), Protocol: "openai", Model: model, Stream: isStream}
 
@@ -869,7 +869,7 @@ func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[strin
 		}
 	}
 	log.Printf("  upstream: account=%s stream=%v tools=%d msgs=%d max_tokens=%v effort=%v",
-		truncateEmail(acc.Email), stream, toolCount, getMsgCount(params), body["max_tokens"], body["reasoning_effort"])
+		sanitizeLog(truncateEmail(acc.Email), 64), stream, toolCount, getMsgCount(params), body["max_tokens"], body["reasoning_effort"])
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -1005,21 +1005,21 @@ func startCooldownRecovery() {
 			poolMu.Unlock()
 
 			for _, acc := range toRecover {
-				log.Printf("cooldown recovery: testing %s", acc.Email)
+				log.Printf("cooldown recovery: testing %s", sanitizeLog(truncateEmail(acc.Email), 64))
 				result := testAccount(acc)
 				if result.OK {
-					log.Printf("cooldown recovery: %s reactivated", acc.Email)
+					log.Printf("cooldown recovery: %s reactivated", sanitizeLog(truncateEmail(acc.Email), 64))
 				} else {
-					log.Printf("cooldown recovery: %s still unavailable: %s", acc.Email, result.Error)
+					log.Printf("cooldown recovery: %s still unavailable: %s", sanitizeLog(truncateEmail(acc.Email), 64), sanitizeLog(result.Error, 256))
 				}
 			}
 			for _, acc := range toReactivate {
-				log.Printf("expired account probe: testing %s", acc.Email)
+				log.Printf("expired account probe: testing %s", sanitizeLog(truncateEmail(acc.Email), 64))
 				result := testAccount(acc)
 				if result.OK {
-					log.Printf("expired account probe: %s reactivated", acc.Email)
+					log.Printf("expired account probe: %s reactivated", sanitizeLog(truncateEmail(acc.Email), 64))
 				} else {
-					log.Printf("expired account probe: %s still unavailable: %s", acc.Email, result.Error)
+					log.Printf("expired account probe: %s still unavailable: %s", sanitizeLog(truncateEmail(acc.Email), 64), sanitizeLog(result.Error, 256))
 				}
 			}
 		}
@@ -1257,7 +1257,7 @@ func setModelCooldown(acc *Account, model string, until time.Time) {
 	acc.ModelCooldowns[model] = until
 	markPoolDirtyLocked()
 	poolMu.Unlock()
-	log.Printf("model cooldown: account=%s model=%s until=%s", truncateEmail(acc.Email), model, until.Format("15:04:05"))
+	log.Printf("model cooldown: account=%s model=%s until=%s", sanitizeLog(truncateEmail(acc.Email), 64), sanitizeLog(model, 128), until.Format("15:04:05"))
 }
 
 func truncateEmail(email string) string {
@@ -1790,7 +1790,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	openAIReq := anthropicToOpenAI(req)
 
-	log.Printf("  anthropic: model=%s stream=%v msgs=%d", req.Model, req.Stream, len(req.Messages))
+	log.Printf("  anthropic: model=%s stream=%v msgs=%d", sanitizeLog(req.Model, 128), req.Stream, len(req.Messages))
 
 	reqLog := RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: req.Model, Stream: req.Stream}
 
