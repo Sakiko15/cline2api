@@ -748,7 +748,10 @@ func handleAdminDeleteAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	poolMu.Lock()
-	pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}}
+	// 仅清空账号与轮询游标；Keys/Models/DefaultModel/管理密码/监听地址必须保留，
+	// 否则所有客户端立刻 401、模型表被清空（P1-10）
+	pool.Accounts = []*Account{}
+	pool.CurrentIdx = 0
 	poolMu.Unlock()
 	savePool()
 		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "accounts_deleted")})

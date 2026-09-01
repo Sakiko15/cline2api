@@ -132,14 +132,21 @@ func restartListener(host string, port int) error {
 		host = "127.0.0.1"
 	}
 	addr := fmt.Sprintf("%s:%d", host, port)
-	listenHost = host
-	listenPort = port
+
+	// 先绑定新地址：bind 失败直接返回错误，旧监听不受影响（P1-9，
+	// 旧实现先 Shutdown 再 ListenAndServe，绑定失败会导致零监听、全代理下线）
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("bind %s: %w", addr, err)
+	}
 
 	serverMu.Lock()
 	old := currentServer
 	server := &http.Server{Addr: addr, Handler: serverMux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	currentServer = server
 	serverMu.Unlock()
+	listenHost = host
+	listenPort = port
 
 	if old != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -157,7 +164,7 @@ func restartListener(host string, port int) error {
 		fmt.Println("  !!! 监听非本机地址，管理后台无鉴权，请确认网络环境安全")
 	}
 	fmt.Println(strings.Repeat("=", 58))
-	return server.ListenAndServe()
+	return server.Serve(ln)
 }
 
 // effectiveAdminHost 返回管理后台/浏览器实际可用的访问地址：
