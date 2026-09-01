@@ -209,6 +209,15 @@ func registerWithCline(workosAccess, workosRefresh string) (*clineAuthResp, erro
 	return &c, nil
 }
 
+// tokenRefreshRejectedError 表示刷新端点明确拒绝了该 refreshToken（HTTP 4xx），
+// 属账号级终态信号；transport/5xx/解析错误为暂时性失败，不得将账号置为 expired
+// （P2-6：此前任何刷新失败——包括一次网络抖动——都会让账号永久失效）。
+type tokenRefreshRejectedError struct{ status int }
+
+func (e *tokenRefreshRejectedError) Error() string {
+	return fmt.Sprintf("cline refresh rejected: HTTP %d", e.status)
+}
+
 func refreshClineToken(refreshToken string) (*clineRefreshResp, error) {
 	body := map[string]string{
 		"refreshToken": refreshToken,
@@ -220,6 +229,9 @@ func refreshClineToken(refreshToken string) (*clineRefreshResp, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		return nil, &tokenRefreshRejectedError{status: resp.StatusCode}
+	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("cline refresh failed: %d", resp.StatusCode)
 	}

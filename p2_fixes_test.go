@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -88,5 +93,107 @@ func TestProxyConfigQuarantine(t *testing.T) {
 	}
 	if cfg.Strategy != "round_robin" {
 		t.Fatalf("corrupt proxy config should fall back to default strategy, got %q", cfg.Strategy)
+	}
+}
+
+// ---- P2-6 token 刷新：鉴权拒绝与暂态失败区分 ----
+
+func TestRefreshClineTokenTypedErrors(t *testing.T) {
+	oldTransport := authClient.Transport
+	t.Cleanup(func() { authClient.Transport = oldTransport })
+
+	// 403：上游明确拒绝 → tokenRefreshRejectedError
+	authClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"denied"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	_, err := refreshClineToken("rt")
+	var rej *tokenRefreshRejectedError
+	if !errors.As(err, &rej) || rej.status != http.StatusForbidden {
+		t.Fatalf("403 should yield tokenRefreshRejectedError, got %v (%T)", err, err)
+	}
+
+	authClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"boom"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	_, err = refreshClineToken("rt")
+	var rej2 *tokenRefreshRejectedError
+	if errors.As(err, &rej2) {
+		t.Fatalf("500 must NOT be tokenRefreshRejectedError, got %v", err)
+	}
+	if err == nil {
+		t.Fatal("500 should return an error")
+	}
+
+	authClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return nil, context.Canceled
+	})
+	_, err = refreshClineToken("rt")
+	if errors.As(err, &rej2) {
+		t.Fatalf("transport error must NOT be tokenRefreshRejectedError, got %v", err)
+	}
+}
+
+func TestRefreshTransportErrorKeepsAccountActive(t *testing.T) {
+	oldPool, oldTransport := pool, authClient.Transport
+	t.Cleanup(func() { pool, authClient.Transport = oldPool, oldTransport })
+
+	acc := &Account{
+		AccountID:    "transient",
+		Email:        "transient@example.com",
+		RefreshToken: "rt",
+		Status:       "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{acc}}
+
+	authClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return nil, context.DeadlineExceeded // 模拟网络抖动
+	})
+
+	err := refreshAccountToken(acc)
+	if err == nil {
+		t.Fatal("expected error on transport failure")
+	}
+	if acc.Status != "active" {
+		t.Fatalf("transient refresh failure must NOT expire account, got %q", acc.Status)
+	}
+}
+
+func TestRefreshRejectedMarksExpired(t *testing.T) {
+	oldPool, oldTransport := pool, authClient.Transport
+	t.Cleanup(func() { pool, authClient.Transport = oldPool, oldTransport })
+
+	acc := &Account{
+		AccountID:    "revoked",
+		Email:        "revoked@example.com",
+		RefreshToken: "rt",
+		Status:       "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{acc}}
+
+	authClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_grant"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	err := refreshAccountToken(acc)
+	if err == nil {
+		t.Fatal("expected error on 401 rejection")
+	}
+	if acc.Status != "expired" {
+		t.Fatalf("4xx rejection should expire account, got %q", acc.Status)
 	}
 }

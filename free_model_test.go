@@ -107,7 +107,7 @@ func TestCallClineAPIRefreshRetryReplaysRequestBody(t *testing.T) {
 	}
 }
 
-func TestCallClineAPIFreeRetriesNextGLMAccountAfterTokenRefreshFailure(t *testing.T) {
+func TestCallClineAPIFreeRetriesNextGLMAccountAfterTransientRefreshFailure(t *testing.T) {
 	oldPool := pool
 	oldConfig := getProxyConfig()
 	oldTransport := httpClient.Transport
@@ -196,8 +196,9 @@ func TestCallClineAPIFreeRetriesNextGLMAccountAfterTokenRefreshFailure(t *testin
 	if got, want := strings.Join(models, ","), freeModelPrimary; got != want {
 		t.Fatalf("models = %q, want %q", got, want)
 	}
-	if first.Status != "expired" {
-		t.Fatalf("first account status = %q, want expired", first.Status)
+	// P2-6：刷新端点返回 500 属暂态失败，账号必须保持 active（不再永久失效）
+	if first.Status != "active" {
+		t.Fatalf("first account status = %q, want active after transient refresh failure", first.Status)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -219,7 +220,12 @@ func refreshAccountToken(acc *Account) error {
 	// 网络调用不持 poolMu（调用方可能在锁外批量刷新，见 handleAdminRefreshAll）
 	resp, err := refreshClineToken(acc.RefreshToken)
 	if err != nil {
-		markAccountExpired(acc)
+		// 仅上游明确拒绝（4xx）才是账号级终态；网络抖动/5xx 属暂态失败，
+		// 保持账号可用，由后续请求重试（P2-6：此前一次抖动即永久失效）
+		var rej *tokenRefreshRejectedError
+		if errors.As(err, &rej) {
+			markAccountExpired(acc)
+		}
 		return fmt.Errorf("token refresh failed: %w", err)
 	}
 

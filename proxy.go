@@ -818,7 +818,11 @@ func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[strin
 				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s token expired permanently", acc.Email)}
 			}
 		} else {
-			markAccountExpired(acc)
+			// 仅上游明确拒绝（4xx）才置 expired；暂态失败保持账号可用（P2-6）
+			var rej *tokenRefreshRejectedError
+			if errors.As(err, &rej) {
+				markAccountExpired(acc)
+			}
 			return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s refresh failed: %w", acc.Email, err)}
 		}
 	}
@@ -888,23 +892,29 @@ func parseCooldownUntil(body string) time.Time {
 }
 
 // startCooldownRecovery 启动后台 goroutine，每 30 秒检查一次 cooldown 账号，
-// 对 CooldownUntil 已过期的账号执行探活，成功则自动激活。
+// 对 CooldownUntil 已过期的账号执行探活，成功则自动激活；
+// 并每 ~5 分钟低频探活 expired 账号（P2-6：刷新 token 仍有效的误标账号可自愈）。
 func startCooldownRecovery() {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
+		tick := 0
 		for range ticker.C {
+			tick++
 			p := loadPool()
 			poolMu.Lock()
 			var toRecover []*Account
+			var toReactivate []*Account
 			for _, acc := range p.Accounts {
-				if acc.Status != "cooldown" {
-					continue
-				}
-				// 有恢复时间且已过期 → 探活
-				// 无恢复时间（旧数据）→ 也尝试探活
-				if acc.CooldownUntil.IsZero() || time.Now().After(acc.CooldownUntil) {
-					toRecover = append(toRecover, acc)
+				switch {
+				case acc.Status == "cooldown":
+					// 有恢复时间且已过期 → 探活
+					// 无恢复时间（旧数据）→ 也尝试探活
+					if acc.CooldownUntil.IsZero() || time.Now().After(acc.CooldownUntil) {
+						toRecover = append(toRecover, acc)
+					}
+				case acc.Status == "expired" && tick%10 == 0:
+					toReactivate = append(toReactivate, acc)
 				}
 			}
 			poolMu.Unlock()
@@ -916,6 +926,15 @@ func startCooldownRecovery() {
 					log.Printf("cooldown recovery: %s reactivated", acc.Email)
 				} else {
 					log.Printf("cooldown recovery: %s still unavailable: %s", acc.Email, result.Error)
+				}
+			}
+			for _, acc := range toReactivate {
+				log.Printf("expired account probe: testing %s", acc.Email)
+				result := testAccount(acc)
+				if result.OK {
+					log.Printf("expired account probe: %s reactivated", acc.Email)
+				} else {
+					log.Printf("expired account probe: %s still unavailable: %s", acc.Email, result.Error)
 				}
 			}
 		}
