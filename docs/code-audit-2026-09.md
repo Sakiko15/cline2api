@@ -108,43 +108,45 @@ main.go (!desktop)                    desktop_main.go (desktop)
 
 ### P1 — 高危（13 项）
 
-**P1-1 ✅ 「刷新全部」持 poolMu 跨 N 次无超时网络调用 → 全局永久停摆**
+> **修复状态（2026-09-01）**：13 项 P1 已全部修复于分支 `fix/p1-audit-2026-09`（P1-7 由 P0-1 闭环：坏文件隔离 + 原子写；P1-2 的 zen 传输为自定义 http2.Transport，标准超时字段不适用，挂起防护由 P1-4 的 context 传播 + Retry-After 钳制落实）。回归测试见 `p1_fixes_test.go`，`go test -race ./...` 通过。以下正文保留审计时原貌。
+
+**P1-1 ✅ [已修复] 「刷新全部」持 poolMu 跨 N 次无超时网络调用 → 全局永久停摆**
 admin.go:713-720：`poolMu.Lock()` 后循环 `refreshAccountToken`（→ http.go:25-27 无 Timeout 的 client）。auth 端点半开连接一次 → poolMu 永久持有，所有 loadPool/pickAccount/admin 请求全部阻塞，且无超时无看门狗。修复：锁内快照、锁外刷新；client 加超时。
 
-**P1-2 ✅ zen 客户端无超时 + 信号量跨重试/退避持有 + Retry-After 无上限 → zen 自死锁**
+**P1-2 ✅ [已修复] zen 客户端无超时 + 信号量跨重试/退避持有 + Retry-After 无上限 → zen 自死锁**
 zen_proxy.go:32（无 Timeout）、zen.go:518-519（`sem <-` 一次获取，defer 循环结束才释放）、zen.go:576-585（`wait = max(delay, parseRetryAfter)`，zen.go:380-396 接受任意秒数/HTTP 日期，无钳制）。8 个请求命中黑洞连接或大 Retry-After（retries 最大 10）→ `zenSem` 永久占满，全部 zen 流量与 `maybeCompact→generateSummary`（compact.go:236）无限阻塞。修复：client/context 超时、钳制 wait（如 ≤30s）、睡眠期释放信号量。
 
-**P1-3 ✅ 全链路零超时（slowloris + 永久挂起）**
+**P1-3 ✅ [已修复] 全链路零超时（slowloris + 永久挂起）**
 `http.Server` 无 Read/Write/Idle/HeaderTimeout（proxy.go:139,495-498）；httpClient 无 Timeout、Transport 无 TLSHandshake/ResponseHeader 超时（http.go:17-27）；zen 客户端同。上游收下 TCP+TLS 后不回包 → handler goroutine 永久卡死；慢速 dribble 头部 → FD 耗尽。修复：`ReadHeaderTimeout:10s, IdleTimeout:120s`（SSE 路径 WriteTimeout 留 0 用每请求计时）；transport 三超时；刷新/鉴权调用专用 30s client。
 
-**P1-4 ✅ 客户端断连不取消上游 + SSE 写错误全忽略**
+**P1-4 ✅ [已修复] 客户端断连不取消上游 + SSE 写错误全忽略**
 三条 SSE 路径的 `w.Write`/`Flush` 错误全部丢弃（proxy.go:1140-1192、1760-1906、responses.go:303-338）；上游请求不带 `r.Context()`（全仓库 `.Context()` 仅见于测试与 restartListener）。客户端 Ctrl-C 后协程继续消费完整上游生成（分钟级、烧 token、占 zen 信号量）；客户端停滞读取 + 无 WriteTimeout → 永久泄漏。修复：`http.NewRequestWithContext(r.Context(), …)` + 写失败即中止。
 
-**P1-5 ✅ 热路径账号字段无锁写**
+**P1-5 ✅ [已修复] 热路径账号字段无锁写**
 proxy.go:735-737、750-758、762-764、779-782、787-789（`acc.Status/CooldownUntil/LastUsed/UsageCount` 无 poolMu）；admin.go:765；与 poolMu 内的遍历（pool.go:178-180/228-230）并发 → 数据竞争（race-detector UB，理论撕裂）。修复：小粒度锁内 helper（markAccountCooldown 等）。
 
-**P1-6 ✅ `{"choices":[]}` → 未检查断言 panic**
+**P1-6 ✅ [已修复] `{"choices":[]}` → 未检查断言 panic**
 proxy.go:1472 `getNested(openAI,"choices",0).(map[string]any)`；1465 只判 `choices == nil`，空数组穿透（normalizeOpenAIResponse proxy.go:1951-1953 原样放行非 map 元素）。上游 200 + 空 choices（过载后端现实可见）→ panic，net/http 逐连接 recover 兜底但客户端只见连接断开、无 JSON 错误、请求日志未落。两条非流式分支（proxy.go:1616、1684）同受影响。修复：comma-ok 断言 + 空回退。
 
-**P1-7 ✅ 池文件损坏 → 静默空池 → 下次保存永久销毁**
+**P1-7 ✅ [已修复·经 P0-1 闭环] 池文件损坏 → 静默空池 → 下次保存永久销毁**
 pool.go:71-74：Unmarshal 失败 → 静默空池（无备份/无告警/无隔离）。断电/崩溃（P0-1 的非原子写放大此概率）→ 重启即"零账号"，且任意一次 savePool 用空池覆盖坏文件。修复：坏文件改名 .bak、尝试修复、拒绝覆盖解析失败的文件、管理端告警。
 
-**P1-8 ✅ parseCooldownUntil 把分钟当小时 + Duration 溢出**
+**P1-8 ✅ [已修复] parseCooldownUntil 把分钟当小时 + Duration 溢出**
 proxy.go:805-821：`"Try again in 45m"` → 组1=45(小时) → **冷却 45 小时**（「代理实证」；"0h 0m" 正确回退 1h）；`999999999999h` → Duration 溢出回绕，可能得到负值（冷却瞬间失效）或任意大值。且冷却持久化到 ModelCooldowns，重启不消失。修复：h/m 分组显式化 + 时长钳制（如 [1m, 24h]）。
 
-**P1-9 ✅ restartListener 先关旧监听再绑新地址 → 绑定失败 = 全代理下线**
+**P1-9 ✅ [已修复] restartListener 先关旧监听再绑新地址 → 绑定失败 = 全代理下线**
 proxy.go:137-159：先换 `currentServer` → Shutdown 旧（2s）→ `ListenAndServe`；端口被占（重启路径不调 freePort）→ 零监听。两次快速改配置互相 Shutdown 对方的新 server → 双失败。`listenHost/listenPort` 无锁写（134-135）。修复：先 `net.Listen` 成功再切流；地址变量纳入 serverMu。
 
-**P1-10 ✅ delete-all 连带清空 API Keys / 模型表 / 默认模型 / 管理密码**
+**P1-10 ✅ [已修复] delete-all 连带清空 API Keys / 模型表 / 默认模型 / 管理密码**
 admin.go:730-733：重置为仅 `Accounts/Keys` 两字段的空池 —— Models、DefaultModel、AdminPasswordHash/Salt、ListenHost 全部清零。i18n 文案只说"删除账号"。所有客户端立刻 401，模型列表依赖 10 分钟 zen 刷新回填（Cline remote 模型不自动恢复）。修复：仅重置 Accounts/CurrentIdx，保留其余字段。
 
-**P1-11 ✅ freeModelChain 任何非 429 错误中断整链**
+**P1-11 ✅ [已修复] freeModelChain 任何非 429 错误中断整链**
 proxy.go:694-697：仅 429 与账号不可用继续走链；链首模型（硬编码常量，proxy.go:26-28）被上游下线/改名 → 400/404 → 整链放弃、客户端拿原始 5xx。三处硬编码模型 ID（proxy.go:26-28、39-46、zen.go:47-56）可漂移失联。修复：4xx（除 401/403 账号级）应推进下一链模型；链由 `getAllModels()` cost=free 动态派生。
 
-**P1-12 ✅ max_tokens / usage 数值溢出与静默改写**
+**P1-12 ✅ [已修复] max_tokens / usage 数值溢出与静默改写**
 proxy.go:569-573：`int(1e19)` → **-9223372036854775808** 直传上游；负数透传（Anthropic 路径 proxy.go:1566 仅修 ==0）；字符串静默变 128000；responses.go:28-30 同模式。proxy.go:934-935 usage 转换：`value >= 0` 防不住 `int64(1e30)` 溢出 → 负 token 数永久入库污染统计。修复：转换前范围钳制（max_tokens ≥1，usage ≤1e7）。
 
-**P1-13 ✅ Anthropic→OpenAI：并行 tool_result 只保留最后一个 + tool_choice 原样透传 + stop_sequences 丢弃**
+**P1-13 ✅ [已修复] Anthropic→OpenAI：并行 tool_result 只保留最后一个 + tool_choice 原样透传 + stop_sequences 丢弃**
 proxy.go:1396/1425-1444：单 `toolResult *map[string]any` 每块覆盖 —— 用户消息含两个 tool_result（并行工具调用标准形态）时上游只见一个 → 400 或上下文错乱；该分支的 text 块同样被丢。proxy.go:1373-1375 `tool_choice` Anthropic 形状直接透传给 OpenAI 上游（`{"type":"any"}` ≠ `"required"`）；`stop_sequences`（proxy.go:1282）解析后从未映射为 `stop`；`temperature:0` 与未设置不可区分（proxy.go:1360-1365）被丢。修复：收集 `[]toolResult` 逐个追加；映射 tool_choice 形状；`stop_sequences→stop`；显式零值透传。
 
 ### P2 — 中危（16 项，精简）
