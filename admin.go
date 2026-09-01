@@ -727,13 +727,17 @@ func handleAdminRefreshAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := loadPool()
+	// 仅在锁内做快照（账号指针稳定），网络刷新在锁外进行——
+	// 否则一次 auth 端点挂起会让 poolMu 永久被占，整个代理停摆（P1-1）。
 	poolMu.Lock()
-	for _, a := range p.Accounts {
+	accs := make([]*Account, len(p.Accounts))
+	copy(accs, p.Accounts)
+	poolMu.Unlock()
+	for _, a := range accs {
 		if err := refreshAccountToken(a); err != nil {
 			log.Printf("Refresh failed for %s: %v", a.Email, err)
 		}
 	}
-	poolMu.Unlock()
 		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "tokens_refreshed")})
 }
 
@@ -778,7 +782,7 @@ func handleAdminAccountReset(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Reset status to active and refresh token, but preserve usage/token statistics.
-		acc.Status = "active"
+		markAccountActive(acc)
 		if err := refreshAccountToken(acc); err != nil {
 			writeAPI(w, http.StatusInternalServerError, apiResponse{Error: tAPI(r, "reset_failed", err.Error())})
 			return

@@ -119,6 +119,55 @@ func savePoolLocked() {
 	}
 }
 
+// markAccount* 系列：账号状态字段的写操作必须持 poolMu——
+// 与选择器/后台协程对 Accounts 的持锁遍历并发，无锁直写是数据竞争（P1-5）。
+
+// markAccountCooldown 将账号置为冷却态（传输错误/无模型名 429）。
+func markAccountCooldown(acc *Account, until time.Time) {
+	if acc == nil {
+		return
+	}
+	poolMu.Lock()
+	acc.Status = "cooldown"
+	acc.CooldownUntil = until
+	poolMu.Unlock()
+	savePool()
+}
+
+// markAccountExpired 将账号置为过期态（token 刷新被拒/二次 401）。
+func markAccountExpired(acc *Account) {
+	if acc == nil {
+		return
+	}
+	poolMu.Lock()
+	acc.Status = "expired"
+	poolMu.Unlock()
+	savePool()
+}
+
+// markAccountActive 将账号恢复为可用（重置/探活成功/刷新成功）。
+func markAccountActive(acc *Account) {
+	if acc == nil {
+		return
+	}
+	poolMu.Lock()
+	acc.Status = "active"
+	poolMu.Unlock()
+	savePool()
+}
+
+// markAccountUsed 记录一次成功使用（LastUsed/UsageCount），持锁自增。
+func markAccountUsed(acc *Account) {
+	if acc == nil {
+		return
+	}
+	poolMu.Lock()
+	acc.LastUsed = time.Now()
+	acc.UsageCount++
+	poolMu.Unlock()
+	savePool()
+}
+
 func addAccount(acc *Account) {
 	p := loadPool()
 	poolMu.Lock()
@@ -156,19 +205,21 @@ func getAccountByID(accountID string) *Account {
 }
 
 func refreshAccountToken(acc *Account) error {
+	// 网络调用不持 poolMu（调用方可能在锁外批量刷新，见 handleAdminRefreshAll）
 	resp, err := refreshClineToken(acc.RefreshToken)
 	if err != nil {
-		acc.Status = "expired"
-		savePool()
+		markAccountExpired(acc)
 		return fmt.Errorf("token refresh failed: %w", err)
 	}
 
+	poolMu.Lock()
 	acc.AccessToken = "workos:" + resp.Data.AccessToken
 	if resp.Data.RefreshToken != "" {
 		acc.RefreshToken = resp.Data.RefreshToken
 	}
 	acc.ExpiresAt = parseExpiry(resp.Data.ExpiresAt) - 60000
 	acc.Status = "active"
+	poolMu.Unlock()
 	savePool()
 	return nil
 }

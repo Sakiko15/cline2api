@@ -740,9 +740,7 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		acc.Status = "cooldown"
-		acc.CooldownUntil = time.Now().Add(5 * time.Minute)
-		savePool()
+		markAccountCooldown(acc, time.Now().Add(5*time.Minute))
 		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request: %w", err)}
 	}
 
@@ -755,20 +753,16 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 			req.Body = io.NopCloser(bytes.NewReader(bodyJSON))
 			resp, err = httpClient.Do(req)
 			if err != nil {
-				acc.Status = "cooldown"
-				acc.CooldownUntil = time.Now().Add(5 * time.Minute)
-				savePool()
+				markAccountCooldown(acc, time.Now().Add(5*time.Minute))
 				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream retry: %w", err)}
 			}
 			if resp.StatusCode == 401 {
 				resp.Body.Close()
-				acc.Status = "expired"
-				savePool()
+				markAccountExpired(acc)
 				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s token expired permanently", acc.Email)}
 			}
 		} else {
-			acc.Status = "expired"
-			savePool()
+			markAccountExpired(acc)
 			return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s refresh failed: %w", acc.Email, err)}
 		}
 	}
@@ -784,17 +778,13 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 			if model != "" {
 				setModelCooldown(acc, model, until)
 			} else {
-				acc.Status = "cooldown"
-				acc.CooldownUntil = until
-				savePool()
+				markAccountCooldown(acc, until)
 			}
 		}
 		return nil, acc, &clineAPIError{statusCode: resp.StatusCode, message: truncate(bodyStr, 500)}
 	}
 
-	acc.LastUsed = time.Now()
-	acc.UsageCount++
-	savePool()
+	markAccountUsed(acc)
 	return resp, acc, nil
 }
 
@@ -916,10 +906,7 @@ func testAccount(acc *Account) accountTestResult {
 	}
 	// If the account was in cooldown/expired but the test succeeded, restore it.
 	if acc.Status != "active" {
-		poolMu.Lock()
-		acc.Status = "active"
-		poolMu.Unlock()
-		savePool()
+		markAccountActive(acc)
 	}
 	return result
 }
