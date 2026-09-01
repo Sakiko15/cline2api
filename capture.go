@@ -126,7 +126,7 @@ func captureRequest(name, method, rawURL, reqBody string, headers map[string]str
 		entry.RespHeaders[k] = strings.Join(vals, ", ")
 	}
 
-	respBytes, _ := io.ReadAll(resp.Body)
+	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 抓包体限额读取（P2-8）
 	entry.RespBody = string(respBytes)
 
 	// Extract cookies

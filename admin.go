@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -45,6 +44,21 @@ func writeAPI(w http.ResponseWriter, status int, resp apiResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(resp)
+}
+
+// readAdminBody 限额读取管理面请求体（默认 1MB）；读取失败或超限时已写好响应，
+// 调用方直接 return（P2-8）。
+func readAdminBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	body, err := readBodyLimited(w, r, maxAdminBodyBytes)
+	if err != nil {
+		if isBodyTooLarge(err) {
+			writeAPI(w, http.StatusRequestEntityTooLarge, apiResponse{Error: tAPI(r, "invalid_request_body")})
+		} else {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		}
+		return nil, false
+	}
+	return body, true
 }
 
 // 管理后台登录会话（内存态，程序重启后需重新登录）。
@@ -277,9 +291,8 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 			writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 			return
 		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		body, ok := readAdminBody(w, r)
+		if !ok {
 			return
 		}
 		defer r.Body.Close()
@@ -337,9 +350,8 @@ func handleAdminPassword(w http.ResponseWriter, r *http.Request) {
 			writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 			return
 		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		body, ok := readAdminBody(w, r)
+		if !ok {
 			return
 		}
 		defer r.Body.Close()
@@ -391,9 +403,8 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+	body, ok := readAdminBody(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()
@@ -456,9 +467,8 @@ func handleAdminAccountDelete(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+	body, ok := readAdminBody(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()
@@ -620,9 +630,8 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+	body, ok := readAdminBody(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()
@@ -704,9 +713,8 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+	body, ok := readAdminBody(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()
@@ -859,9 +867,8 @@ func handleAdminAccountReset(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+	body, ok := readAdminBody(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()
@@ -896,9 +903,8 @@ func handleAdminAccountTest(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+	body, ok := readAdminBody(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()
@@ -1053,9 +1059,8 @@ func handleAdminDeleteKey(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+	body, ok := readAdminBody(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()
@@ -1101,9 +1106,8 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+	body, ok := readAdminBody(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()
@@ -1239,9 +1243,8 @@ func handleAdminModelAdd(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+	body, ok := readAdminBody(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()
@@ -1305,9 +1308,8 @@ func handleAdminModelDelete(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+	body, ok := readAdminBody(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()
@@ -1466,9 +1468,8 @@ func handleOpenCodeConfigUpdate(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+	body, ok := readAdminBody(w, r)
+	if !ok {
 		return
 	}
 	defer r.Body.Close()

@@ -383,11 +383,8 @@ func startProxy(host string, port int) error {
 			return
 		}
 
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error": map[string]string{"message": err.Error(), "type": "parse_error"},
-			})
+		body, ok := readChatBody(w, r)
+		if !ok {
 			return
 		}
 
@@ -875,7 +872,7 @@ func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[strin
 	}
 
 	if resp.StatusCode != 200 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes := readAllLimited(resp.Body, 64<<10) // 错误体限额读取（P2-8）
 		resp.Body.Close()
 		bodyStr := string(bodyBytes)
 		// 429：模型级冷却 —— 只暂停该模型，账号保持可用，其他模型继续转发
@@ -1012,7 +1009,7 @@ func testAccount(acc *Account) accountTestResult {
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20)) // 探活响应限额读取（P2-8）
 	if err != nil {
 		result.DurationMs = time.Since(started).Milliseconds()
 		result.Error = "read response: " + truncate(err.Error(), 200)
@@ -1726,11 +1723,8 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 }
 
 func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"message": err.Error(), "type": "parse_error"},
-		})
+	body, ok := readChatBody(w, r)
+	if !ok {
 		return
 	}
 

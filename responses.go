@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -490,9 +489,13 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	body, err := io.ReadAll(r.Body)
+	body, err := readBodyLimited(w, r, maxChatBodyBytes)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		status := http.StatusBadRequest
+		if isBodyTooLarge(err) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
 		return
 	}
 	var params map[string]any

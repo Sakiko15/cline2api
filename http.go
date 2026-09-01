@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,39 @@ import (
 )
 
 var execCommand = exec.Command
+
+// 请求体限额（var 便于测试收缩）：聊天类端点 32MB，管理面 1MB（P2-8）。
+var (
+	maxChatBodyBytes  int64 = 32 << 20
+	maxAdminBodyBytes int64 = 1 << 20
+)
+
+// readBodyLimited 限额读取请求体，超限返回 *http.MaxBytesError（isBodyTooLarge 判定）。
+func readBodyLimited(w http.ResponseWriter, r *http.Request, max int64) ([]byte, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, max)
+	return io.ReadAll(r.Body)
+}
+
+func isBodyTooLarge(err error) bool {
+	var mbe *http.MaxBytesError
+	return errors.As(err, &mbe)
+}
+
+// readChatBody 限额读取 /v1 聊天类端点请求体（默认 32MB）；失败或超限时已写好响应（P2-8）。
+func readChatBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	body, err := readBodyLimited(w, r, maxChatBodyBytes)
+	if err != nil {
+		status := http.StatusBadRequest
+		if isBodyTooLarge(err) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]any{
+			"error": map[string]string{"message": err.Error(), "type": "parse_error"},
+		})
+		return nil, false
+	}
+	return body, true
+}
 
 var httpTransport = &http.Transport{
 	Proxy:                http.ProxyFromEnvironment,
@@ -59,7 +93,8 @@ func httpPostJSON(rawURL string, body any) (*http.Response, error) {
 }
 
 func readBody(resp *http.Response) string {
-	data, err := io.ReadAll(resp.Body)
+	// 上游错误体只需诊断用途，限额读取防异常大的错误页（P2-8）
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
 		return fmt.Sprintf("<read error: %v>", err)
 	}

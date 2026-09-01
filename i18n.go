@@ -41,6 +41,10 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "不允许覆盖受保护的请求头：%s",
 		localeEN: "Overriding the protected header is not allowed: %s",
 	},
+	"invalid_request_body": {
+		localeZH: "请求体过大或读取失败",
+		localeEN: "Request body too large or failed to read",
+	},
 	"password_not_enabled": {
 		localeZH: "后台未启用密码",
 		localeEN: "Admin password is not enabled",

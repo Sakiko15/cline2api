@@ -679,3 +679,66 @@ func TestClineHeadersSkipsReserved(t *testing.T) {
 		t.Fatalf("custom header should pass through, got %q", got)
 	}
 }
+
+// ---- P2-8 请求体限额 ----
+
+func TestReadAdminBodyTooLarge(t *testing.T) {
+	oldMax := maxAdminBodyBytes
+	t.Cleanup(func() { maxAdminBodyBytes = oldMax })
+	maxAdminBodyBytes = 16
+
+	r := httptest.NewRequest("POST", "/admin/api/login", strings.NewReader(`{"password":"12345678901234567890"}`))
+	rec := httptest.NewRecorder()
+
+	body, ok := readAdminBody(rec, r)
+	if ok {
+		t.Fatal("oversized body should be rejected")
+	}
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+	if body != nil {
+		t.Fatalf("body should be nil on rejection")
+	}
+}
+
+func TestReadAdminBodyOK(t *testing.T) {
+	oldMax := maxAdminBodyBytes
+	t.Cleanup(func() { maxAdminBodyBytes = oldMax })
+	maxAdminBodyBytes = 1 << 20
+
+	r := httptest.NewRequest("POST", "/admin/api/login", strings.NewReader(`{"password":"pw"}`))
+	rec := httptest.NewRecorder()
+
+	body, ok := readAdminBody(rec, r)
+	if !ok || string(body) != `{"password":"pw"}` {
+		t.Fatalf("normal body should pass, got %q ok=%v", body, ok)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("no response should be written on success, got %d", rec.Code)
+	}
+}
+
+// 端到端：聊天端点超限请求体 → 413（需先绕过空池 401 分支）。
+func TestChatBodyTooLarge(t *testing.T) {
+	oldMax, oldPool := maxChatBodyBytes, pool
+	t.Cleanup(func() { maxChatBodyBytes, pool = oldMax, oldPool })
+	maxChatBodyBytes = 64
+	// ExpiresAt 必须指向未来，否则 startProxy 预热会发起真实 token 刷新网络调用（致启动超时）
+	pool = &AccountPool{Accounts: []*Account{&Account{
+		AccountID: "a1", Email: "a@example.com", AccessToken: "tok",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Status: "active",
+	}}, Keys: []string{}, Models: []Model{}}
+
+	baseURL := protocolTestServer(t)
+	resp, err := http.Post(baseURL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"`+strings.Repeat("x", 200)+`"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 413 (body=%s)", resp.StatusCode, body)
+	}
+}
