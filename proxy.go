@@ -765,6 +765,11 @@ func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[strin
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			// 客户端断开/请求取消不是账号问题，不得冷却账号，
+			// 否则 free 链会因一次用户取消把全池账号依次打入冷却（P1-4 回归修复）
+			return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request canceled: %w", err)}
+		}
 		markAccountCooldown(acc, time.Now().Add(5*time.Minute))
 		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request: %w", err)}
 	}
@@ -778,6 +783,9 @@ func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[strin
 			req.Body = io.NopCloser(bytes.NewReader(bodyJSON))
 			resp, err = httpClient.Do(req)
 			if err != nil {
+				if ctx.Err() != nil {
+					return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream retry canceled: %w", err)}
+				}
 				markAccountCooldown(acc, time.Now().Add(5*time.Minute))
 				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream retry: %w", err)}
 			}

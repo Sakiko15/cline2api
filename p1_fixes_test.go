@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -282,5 +283,35 @@ func TestRefreshAllUpdatesAccounts(t *testing.T) {
 	}
 }
 
-// json 包在多个测试中使用，集中引用避免 import 抖动。
-var _ = json.Marshal
+// ---- P1-4 回归修复：ctx 取消不得冷却/过期账号 ----
+
+func TestCallClineAPICtxCancelDoesNotCooldownAccount(t *testing.T) {
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() { httpClient.Transport = oldTransport })
+
+	_ = loadPool() // 初始化全局池，避免 savePool 写出 "null"
+	acc := &Account{
+		AccountID:   "ctx1",
+		Email:       "ctx@example.com",
+		AccessToken: "tok",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return nil, context.Canceled
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := callClineAPIWithAccount(ctx, acc, map[string]any{
+		"model":    "m",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}, false)
+	if err == nil {
+		t.Fatal("expected error on canceled context")
+	}
+	if acc.Status != "active" {
+		t.Fatalf("account must NOT be cooled on ctx cancel, got %q", acc.Status)
+	}
+}

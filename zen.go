@@ -582,6 +582,10 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 
 		resp, err := getZenHTTPClient().Do(req)
 		if err != nil {
+			if ctx.Err() != nil {
+				// 客户端断开/请求取消：立即中止，不退避重试
+				return nil, fmt.Errorf("zen request canceled: %w", err)
+			}
 			// 网络错误：退避重试（不计入故障转移，瞬时可恢复）
 			if attempt < retries {
 				log.Printf("  zen network error (%v), retry %d/%d after %v", err, attempt+1, retries, delay)
