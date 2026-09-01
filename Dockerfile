@@ -15,9 +15,7 @@ COPY --from=builder /build/cline-proxy .
 
 EXPOSE 3457
 
-VOLUME ["/app/data"]
-
-ENV PORT=3457
+# CLINE_PROXY_HOST 会被 main.go configuredHost() 读取，作为默认监听地址
 ENV CLINE_PROXY_HOST=0.0.0.0
 
 ENTRYPOINT ["/app/cline-proxy"]
