@@ -19,6 +19,10 @@ services:
       - ./.cline-zen.json:/app/.cline-zen.json
       # 可选：System Prompt 覆盖文件（需先创建，否则同样会变成目录）
       - ./override.md:/app/override.md:ro
+    # 公网部署必须先设管理密码：要么设置环境变量 CLINE_ADMIN_PASSWORD 首启引导，
+    # 要么仅映射 127.0.0.1 并经 SSH 隧道进入后台设置（未设密码时管理 API 仅允许本机访问）
+    # environment:
+    #   - CLINE_ADMIN_PASSWORD=change-me-first
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3457/health"]
       interval: 30s

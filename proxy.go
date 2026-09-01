@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -270,6 +271,13 @@ func startProxy(host string, port int) error {
 	}))
 
 	// Admin API (frontend + REST)
+	// CLINE_ADMIN_PASSWORD：未设密码时的一次性引导（配合管理面 fail-closed，
+	// 公网实例无需本机登录即可设置初始密码；已设密码的实例忽略该变量）
+	if envPwd := os.Getenv("CLINE_ADMIN_PASSWORD"); envPwd != "" && loadPool().AdminPasswordHash == "" {
+		setAdminPassword(envPwd)
+		log.Printf("admin password bootstrapped from CLINE_ADMIN_PASSWORD environment variable")
+	}
+
 	registerAdminRoutes(mux)
 
 	apiKeyHandler := func(next http.HandlerFunc) http.HandlerFunc {
@@ -1069,7 +1077,7 @@ func modelCooldownActive(acc *Account, model string) bool {
 	}
 	if time.Now().After(until) {
 		delete(acc.ModelCooldowns, model)
-		savePool()
+		savePoolLocked()
 		return false
 	}
 	return true
@@ -1263,11 +1271,14 @@ type anthropicMsg struct {
 }
 
 type toolAccumulator struct {
-	index   int
-	id      string
-	name    string
-	args    string
-	emitted bool
+	index    int    // Anthropic content_block index（content_block_start 时分配，不复用上游序号）
+	id       string
+	name     string
+	args     string
+	started  bool // content_block_start 已发出
+	open     bool // start 已发、stop 未发
+	closed   bool // 已 stop；Anthropic 块不可重开，迟到片段丢弃
+	sentArgs int  // 已通过 input_json_delta 发出的 args 字节数
 }
 
 type anthropicReq struct {
@@ -1725,18 +1736,46 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		},
 	})
 
-	textIndex := new(int)
-	*textIndex = -1
+	// content_block 统一 index 计数：文本与工具块共用一个递增计数器，
+	// 保证同一条流内 index 唯一（Anthropic 契约：块按 index 顺序 open→close）。
+	nextBlockIdx := 0
+	textIdx := -1
 	hasText := false
+	textOpen := false
 	pendingTools := map[int]*toolAccumulator{}
+	var openTool *toolAccumulator
 
-	emitToolBlock := func(acc *toolAccumulator) {
-		acc.emitted = true
-		var argsObj any
-		json.Unmarshal([]byte(acc.args), &argsObj)
-		if argsObj == nil {
-			argsObj = map[string]any{}
+	closeTextBlock := func() {
+		if textOpen {
+			emit("content_block_stop", map[string]any{
+				"type":  "content_block_stop",
+				"index": textIdx,
+			})
+			textOpen = false
 		}
+	}
+	closeOpenTool := func() {
+		if openTool != nil && openTool.open {
+			emit("content_block_stop", map[string]any{
+				"type":  "content_block_stop",
+				"index": openTool.index,
+			})
+			openTool.open = false
+			openTool.closed = true
+		}
+	}
+	startToolBlock := func(acc *toolAccumulator) {
+		if acc.started {
+			return
+		}
+		// 块必须顺序开闭：先收掉还开着的文本块与前一个工具块
+		closeTextBlock()
+		closeOpenTool()
+		acc.started = true
+		acc.open = true
+		acc.index = nextBlockIdx
+		nextBlockIdx++
+		// Anthropic 规范：content_block_start 的 input 恒为 {}，参数经 input_json_delta 传递
 		emit("content_block_start", map[string]any{
 			"type":  "content_block_start",
 			"index": acc.index,
@@ -1744,13 +1783,23 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 				"type":  "tool_use",
 				"id":    acc.id,
 				"name":  acc.name,
-				"input": argsObj,
+				"input": map[string]any{},
 			},
 		})
-		emit("content_block_stop", map[string]any{
-			"type":  "content_block_stop",
-			"index": acc.index,
-		})
+		openTool = acc
+	}
+	emitToolArgsDelta := func(acc *toolAccumulator) {
+		if len(acc.args) > acc.sentArgs {
+			emit("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": acc.index,
+				"delta": map[string]any{
+					"type":         "input_json_delta",
+					"partial_json": acc.args[acc.sentArgs:],
+				},
+			})
+			acc.sentArgs = len(acc.args)
+		}
 	}
 
 	reader := bufio.NewReader(upstream.Body)
@@ -1813,10 +1862,12 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		if c, ok := delta["content"].(string); ok && c != "" {
 			if !hasText {
 				hasText = true
-				*textIndex++
+				textIdx = nextBlockIdx
+				nextBlockIdx++
+				textOpen = true
 				emit("content_block_start", map[string]any{
 					"type":  "content_block_start",
-					"index": *textIndex,
+					"index": textIdx,
 					"content_block": map[string]any{
 						"type": "text",
 						"text": "",
@@ -1825,7 +1876,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			}
 			emit("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
-				"index": *textIndex,
+				"index": textIdx,
 				"delta": map[string]any{
 					"type": "text_delta",
 					"text": sanitizeContent(c),
@@ -1833,7 +1884,8 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			})
 		}
 
-		// Tool calls - accumulate and emit when complete
+		// Tool calls - accumulate；id/name 齐备即开块，此后每个参数片段实时以
+		// input_json_delta 透传（修复：旧实现首个非空片段即整块发射且丢弃后续参数）。
 		if tcRaw, ok := delta["tool_calls"].([]any); ok {
 			for _, tc := range tcRaw {
 				tcMap, _ := tc.(map[string]any)
@@ -1846,8 +1898,12 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 				}
 				acc, exists := pendingTools[idx]
 				if !exists {
-					acc = &toolAccumulator{index: idx}
+					acc = &toolAccumulator{}
 					pendingTools[idx] = acc
+				}
+				if acc.closed {
+					log.Printf("  anthropic stream: dropping late fragment for closed tool block (upstream index %d)", idx)
+					continue
 				}
 				if id, ok := tcMap["id"].(string); ok && id != "" {
 					acc.id = id
@@ -1860,9 +1916,13 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 						acc.args += args
 					}
 				}
-				if acc.id != "" && acc.name != "" && acc.args != "" && !acc.emitted {
-					emitToolBlock(acc)
+				if !acc.started {
+					if acc.id == "" || acc.name == "" {
+						continue // 等后续片段补齐 id/name
+					}
+					startToolBlock(acc)
 				}
+				emitToolArgsDelta(acc)
 			}
 		}
 
@@ -1877,19 +1937,49 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		}
 	}
 
-	// Stop text block if active
-	if hasText {
+	// 流结束：关闭未闭合块；从未 started 的工具块按上游 index 确定性顺序补发完整三段
+	closeTextBlock()
+	closeOpenTool()
+	toolOrder := make([]int, 0, len(pendingTools))
+	for idx := range pendingTools {
+		toolOrder = append(toolOrder, idx)
+	}
+	sort.Ints(toolOrder)
+	for _, idx := range toolOrder {
+		acc := pendingTools[idx]
+		if acc.started {
+			continue
+		}
+		if acc.id == "" && acc.name == "" && acc.args == "" {
+			continue
+		}
+		acc.started = true
+		acc.index = nextBlockIdx
+		nextBlockIdx++
+		emit("content_block_start", map[string]any{
+			"type":  "content_block_start",
+			"index": acc.index,
+			"content_block": map[string]any{
+				"type":  "tool_use",
+				"id":    acc.id,
+				"name":  acc.name,
+				"input": map[string]any{},
+			},
+		})
+		if len(acc.args) > 0 {
+			emit("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": acc.index,
+				"delta": map[string]any{
+					"type":         "input_json_delta",
+					"partial_json": acc.args,
+				},
+			})
+		}
 		emit("content_block_stop", map[string]any{
 			"type":  "content_block_stop",
-			"index": *textIndex,
+			"index": acc.index,
 		})
-	}
-
-	// Emit any remaining un-emitted tool blocks
-	for _, acc := range pendingTools {
-		if !acc.emitted {
-			emitToolBlock(acc)
-		}
 	}
 
 	emit("message_delta", map[string]any{

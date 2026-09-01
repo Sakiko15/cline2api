@@ -69,6 +69,12 @@ func loadPool() *AccountPool {
 
 	var p AccountPool
 	if err := json.Unmarshal(data, &p); err != nil {
+		// 坏文件改名隔离：否则空池会在下一次 savePool 时覆盖销毁原始数据
+		if renameErr := os.Rename(poolPath, poolPath+".bad"); renameErr == nil {
+			log.Printf("accounts file corrupt, quarantined as %s.bad: %v", poolPath, err)
+		} else {
+			log.Printf("accounts file parse failed (quarantine failed: %v): %v", renameErr, err)
+		}
 		pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{}}
 		return pool
 	}
@@ -86,9 +92,29 @@ func loadPool() *AccountPool {
 	return pool
 }
 
+// savePool 在未持有 poolMu 时使用：取锁后持久化。
+// 注意：已持有 poolMu 的调用方必须改调 savePoolLocked()，否则死锁。
 func savePool() {
-	data, _ := json.MarshalIndent(pool, "", "  ")
-	if err := os.WriteFile(poolPath, data, 0600); err != nil {
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	savePoolLocked()
+}
+
+// savePoolLocked 在已持有 poolMu 的前提下持久化池（tmp+rename 原子写）。
+// Marshal 必须在锁内进行：否则与并发修改 ModelStats/ModelCooldowns 等映射产生
+// "concurrent map iteration and map write" 致命错误（进程直接退出，无法 recover）。
+func savePoolLocked() {
+	data, err := json.MarshalIndent(pool, "", "  ")
+	if err != nil {
+		log.Printf("Failed to marshal accounts: %v", err)
+		return
+	}
+	tmp := poolPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		log.Printf("Failed to save accounts: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, poolPath); err != nil {
 		log.Printf("Failed to save accounts: %v", err)
 	}
 }
@@ -109,7 +135,7 @@ func removeAccount(accountID string) bool {
 	for i, a := range p.Accounts {
 		if a.AccountID == accountID {
 			p.Accounts = append(p.Accounts[:i], p.Accounts[i+1:]...)
-			savePool()
+			savePoolLocked()
 			return true
 		}
 	}
@@ -218,7 +244,7 @@ func pickAccountForModelWithFallback(model string, fallbackToActive bool) *Accou
 		acc = eligible[p.CurrentIdx]
 		p.CurrentIdx = (p.CurrentIdx + 1) % len(eligible)
 	}
-	savePool()
+	savePoolLocked()
 	return acc
 }
 
@@ -248,7 +274,7 @@ func pickAccountLocked(p *AccountPool) *Account {
 		acc = active[p.CurrentIdx]
 		p.CurrentIdx = (p.CurrentIdx + 1) % len(active)
 	}
-	savePool()
+	savePoolLocked()
 	return acc
 }
 

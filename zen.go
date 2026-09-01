@@ -300,6 +300,19 @@ func setZenConfig(c *zenConfigData) {
 	rebuildZenSem()
 }
 
+// cloneZenConfig 返回当前 zen 配置的深拷贝（Proxies 独立），供写时复制修改。
+// getZenConfig 返回的是共享指针，写方必须 clone 后经 setZenConfig 原子替换，
+// 否则与并发读方（callZenAPI/routeModel/maybeCompact）产生数据竞争。
+func cloneZenConfig() *zenConfigData {
+	zenConfigMu.Lock()
+	defer zenConfigMu.Unlock()
+	c := *zenConfig
+	if zenConfig.Proxies != nil {
+		c.Proxies = append([]string(nil), zenConfig.Proxies...)
+	}
+	return &c
+}
+
 // ============ 限流防御状态机 ============
 
 var (

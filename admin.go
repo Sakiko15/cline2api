@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -95,11 +96,26 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/open-external", auth(handleOpenExternal))
 }
 
-// requireAdminAuth 后台访问鉴权中间件：未设置密码直接放行，否则校验会话 cookie。
+// isLoopbackRequest 判断请求是否来自本机（127.0.0.1 / ::1）。
+func isLoopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// requireAdminAuth 后台访问鉴权中间件：未设置密码时仅允许本机访问（fail-closed，
+// 防止公网部署在设置密码前暴露管理面——含明文 token 导出），否则校验会话 cookie。
 func requireAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if loadPool().AdminPasswordHash == "" {
-			next(w, r)
+			if isLoopbackRequest(r) {
+				next(w, r)
+				return
+			}
+			writeAPI(w, http.StatusForbidden, apiResponse{Error: tAPI(r, "admin_not_bootstrapped")})
 			return
 		}
 			c, err := r.Cookie(adminSessionCookie)
@@ -887,6 +903,21 @@ func setProxyConfig(c *proxyConfigData) {
 	saveProxyConfigLocked()
 }
 
+// cloneProxyConfig 返回当前代理配置的深拷贝（Headers 独立），供写时复制修改。
+// getProxyConfig 返回的是共享指针，禁止就地修改——写方必须 clone 后经 setProxyConfig 原子替换，
+// 否则与每请求 clineHeaders 的 map 遍历并发会触发致命的 "concurrent map writes"。
+func cloneProxyConfig() *proxyConfigData {
+	proxyConfigMu.Lock()
+	defer proxyConfigMu.Unlock()
+	c := *proxyConfig
+	headers := make(map[string]string, len(proxyConfig.Headers))
+	for k, v := range proxyConfig.Headers {
+		headers[k] = v
+	}
+	c.Headers = headers
+	return &c
+}
+
 // GET /admin/api/keys
 func handleAdminGetKeys(w http.ResponseWriter, r *http.Request) {
 	p := loadPool()
@@ -980,7 +1011,7 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := getProxyConfig()
+	cfg := cloneProxyConfig()
 	changed := false
 	restarting := false
 
@@ -1342,7 +1373,7 @@ func handleOpenCodeConfigUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := getZenConfig()
+	cfg := cloneZenConfig()
 	if req.Enabled != nil {
 		cfg.Enabled = *req.Enabled
 	}
