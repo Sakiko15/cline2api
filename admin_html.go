@@ -1189,7 +1189,10 @@ document.documentElement.lang = (LANG==='en')?'en':'zh-CN';
 const API = '/admin/api';
 
 const _ = id => document.getElementById(id);
-const esc = s => { const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; };
+// esc 转义 & < > " ' 五个实体：textContent/innerHTML 法不转义引号，
+// 属性型 sink（title/value）会被双引号逃逸（P2-1）
+const esc = s => (s === undefined || s === null ? '' : String(s))
+  .replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const formatNumber = n => new Intl.NumberFormat(LC()).format(n || 0);
 const formatTokenCount = n => {
   const value = Number(n) || 0;
@@ -1803,7 +1806,8 @@ function isOcModel(m) { return m.source === 'zen' || m.provider === 'opencode'; 
 function renderModelChip(m) {
   let item = '<span class="model-tag ' + (m.cost || 'free') + '">' + esc(m.id) + '</span>';
   if (m.custom) {
-    item += '<button class="btn btn-sm btn-danger" style="padding:2px 6px" onclick="deleteModel(\'' + esc(m.id) + '\')" title="' + t('删除') + '">✕</button>';
+    // data 属性 + 事件委托：onclick 内联 JS 串会被引号逃逸（P2-1）
+    item += '<button class="btn btn-sm btn-danger" style="padding:2px 6px" data-del-model="' + esc(m.id) + '" title="' + t('删除') + '">✕</button>';
   }
   return '<span class="model-item">' + item + '</span>';
 }
@@ -2165,6 +2169,13 @@ applyLang();
 loadStats();
 loadAccounts();
 loadKeys();
+// 模型删除按钮事件委托：模型 ID 任意字符都会安全落于 data 属性（P2-1）
+if (_('modelsList')) {
+  _('modelsList').addEventListener('click', e => {
+    const btn = e.target.closest('[data-del-model]');
+    if (btn) deleteModel(btn.getAttribute('data-del-model'));
+  });
+}
 loadModels().then(() => loadConfig());
 setInterval(() => { loadStats(); }, 10000);
 </script>
