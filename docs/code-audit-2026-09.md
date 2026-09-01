@@ -209,20 +209,22 @@ remote/zen 同步只替换各自 Source 桶、从不跨源去重（models_sync.g
 
 ### P3 — 低危（14 项，一行式）
 
-1. ✅ 每个 pick/finish 全量重写池文件（pool.go:221/251 + 每请求 789/1045）——写放大 + pick 持锁磁盘 IO（修复：脏标记 + 1s 合并）
-2. ✅ round-robin CurrentIdx 在两个不同过滤列表间共享索引（pool.go:215-219 vs 245-249），冷却态变化时跳号
-3. ✅ activeCount 启动快照陈旧（proxy.go:228-241；/health 与 337/428 守卫用旧值）
-4. ✅ 登录防爆破仅 `time.Sleep(500ms)`（admin.go:196-199），并发连接不受限、无锁定
-5. ✅ GET logout 无方法校验（admin.go:217-222）；GET export/open-external 在 Lax 下可被顶层导航触发
-6. ✅ 密码比较 `==`（admin.go:161）与 API key `==` 非常数时间
-7. ✅ 无任何安全头（无 CSP/nosniff/X-Frame-Options，admin.go:254-262）→ 放大 XSS、可被 iframe 点击劫持
-8. ✅ 密码哈希单轮 SHA-256(salt+pwd)（admin.go:126-129）无 KDF；改密无需旧密码、空串即清除（admin.go:227-252）
-9. ✅ randomHex 失败返回 ""（admin.go:167-168）→ 空会话令牌可登录（RNG 失败概率极低但属完全绕过）
-10. ✅ 上游错误体回显给 /v1 客户端并入库 30 天（proxy.go:445-448、784；request_logs.go:191）
-11. ✅ /health 与 /v1/health 暴露版本 + 账号数（proxy.go:256-270），无鉴权可指纹
-12. ✅ 日志注入（model 串原样入日志 proxy.go:371）+ 部分路径 email 不脱敏（admin.go:333 等，truncateEmail 仅热路径使用）
-13. ✅ randHex/rand.Read 错误忽略（zen.go:439-443）；limit 用 Sscanf 宽松解析（admin.go:1264-1271，"50abc"→50）；account-test 空体即全量实测每账号（admin.go:790）
-14. ✅ override.md 每请求读盘 + 相对路径（与其他文件不一致）+ 无大小上限（proxy.go:1289-1302）；truncate 按字节切 UTF-8 产生 U+FFFD（http.go:59-64 等）；request log 全量重写 O(n)/请求（request_logs.go:104-113）；oauthSessions/已删模型的冷却项不清理
+> **修复状态（2026-09-01）**：14 项 P3 已全部修复于分支 `fix/p3-audit-2026-09`（提交 C1-C12），各含回归测试（p3_fixes_test.go、debounce.go），`go test -race ./...` 通过。行为变化：/v1 错误消息通用化（原文仅入管理日志）、改密需当前密码且空密码拒绝、/health 精简为 status、池/日志写盘脏标记 +1s 合并、logout/export/open-external POST-only、密码哈希 PBKDF2（登录时透明迁移，降级旧版将无法登录）、登录按 IP 5 次锁 5 分钟、account-test 需显式目标、limit/cursor/Retry-After 严格解析、override.md 走 resolveDataPath + 缓存 + 256KiB 上限、管理面新增安全头。以下正文保留审计时原貌（行号为审计时版本）。
+
+1. ✅ [已修复] 每个 pick/finish 全量重写池文件（pool.go:221/251 + 每请求 789/1045）——写放大 + pick 持锁磁盘 IO（修复：脏标记 + 1s 合并）
+2. ✅ [已修复] round-robin CurrentIdx 在两个不同过滤列表间共享索引（pool.go:215-219 vs 245-249），冷却态变化时跳号
+3. ✅ [已修复] activeCount 启动快照陈旧（proxy.go:228-241；/health 与 337/428 守卫用旧值）
+4. ✅ [已修复] 登录防爆破仅 `time.Sleep(500ms)`（admin.go:196-199），并发连接不受限、无锁定
+5. ✅ [已修复] GET logout 无方法校验（admin.go:217-222）；GET export/open-external 在 Lax 下可被顶层导航触发
+6. ✅ [已修复] 密码比较 `==`（admin.go:161）与 API key `==` 非常数时间
+7. ✅ [已修复] 无任何安全头（无 CSP/nosniff/X-Frame-Options，admin.go:254-262）→ 放大 XSS、可被 iframe 点击劫持
+8. ✅ [已修复] 密码哈希单轮 SHA-256(salt+pwd)（admin.go:126-129）无 KDF；改密无需旧密码、空串即清除（admin.go:227-252）
+9. ✅ [已修复] randomHex 失败返回 ""（admin.go:167-168）→ 空会话令牌可登录（RNG 失败概率极低但属完全绕过）
+10. ✅ [已修复] 上游错误体回显给 /v1 客户端并入库 30 天（proxy.go:445-448、784；request_logs.go:191）
+11. ✅ [已修复] /health 与 /v1/health 暴露版本 + 账号数（proxy.go:256-270），无鉴权可指纹
+12. ✅ [已修复] 日志注入（model 串原样入日志 proxy.go:371）+ 部分路径 email 不脱敏（admin.go:333 等，truncateEmail 仅热路径使用）
+13. ✅ [已修复] randHex/rand.Read 错误忽略（zen.go:439-443）；limit 用 Sscanf 宽松解析（admin.go:1264-1271，"50abc"→50）；account-test 空体即全量实测每账号（admin.go:790）
+14. ✅ [已修复] override.md 每请求读盘 + 相对路径（与其他文件不一致）+ 无大小上限（proxy.go:1289-1302）；truncate 按字节切 UTF-8 产生 U+FFFD（http.go:59-64 等）；request log 全量重写 O(n)/请求（request_logs.go:104-113）；oauthSessions/已删模型的冷却项不清理
 
 **「假设」级（不确证，附验证方法）**：ExpiresAt 毫秒单位假设（auth.go:257-276，若上游改秒则令牌永过期——用真实响应核实）；XSS 远程可触发性（需上游错误体回显 `"`）；Responses `output:[]` 对客户端的实际影响面。
 
