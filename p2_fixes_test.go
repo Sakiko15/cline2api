@@ -304,3 +304,118 @@ func TestChatPropagatesUpstreamStatus(t *testing.T) {
 		t.Fatalf("status = %d, want 403 (body=%s)", resp.StatusCode, body)
 	}
 }
+
+// ---- P2-10 非流式 Anthropic：文本与工具块共存 ----
+
+func TestOpenAIToAnthropicKeepsTextWithToolCalls(t *testing.T) {
+	upstream := map[string]any{
+		"model": "m",
+		"choices": []any{map[string]any{
+			"finish_reason": "tool_calls",
+			"message": map[string]any{
+				"role":    "assistant",
+				"content": "Let me check that for you.",
+				"tool_calls": []any{map[string]any{
+					"id":   "call_1",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "fs_read",
+						"arguments": `{"path":"a.txt"}`,
+					},
+				}},
+			},
+		}},
+	}
+	out := openAIToAnthropic(upstream)
+
+	blocks, _ := out["content"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("content should keep text + tool_use, got %v", blocks)
+	}
+	if blocks[0].(map[string]any)["type"] != "text" || blocks[1].(map[string]any)["type"] != "tool_use" {
+		t.Fatalf("block order wrong: %v", blocks)
+	}
+	if out["stop_reason"] != "tool_use" {
+		t.Fatalf("stop_reason = %v, want tool_use", out["stop_reason"])
+	}
+}
+
+// 上游报 stop/length 但带 tool_calls 时的 stop_reason 映射。
+func TestOpenAIToAnthropicStopReasonMapping(t *testing.T) {
+	mk := func(finish string) map[string]any {
+		return map[string]any{
+			"choices": []any{map[string]any{
+				"finish_reason": finish,
+				"message": map[string]any{
+					"content":    "x",
+					"tool_calls": []any{map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "f", "arguments": "{}"}}},
+				},
+			}},
+		}
+	}
+	if out := openAIToAnthropic(mk("stop")); out["stop_reason"] != "tool_use" {
+		t.Errorf("finish=stop + tool_calls → %v, want tool_use", out["stop_reason"])
+	}
+	if out := openAIToAnthropic(mk("length")); out["stop_reason"] != "max_tokens" {
+		t.Errorf("finish=length + tool_calls → %v, want max_tokens", out["stop_reason"])
+	}
+	plain := map[string]any{
+		"choices": []any{map[string]any{"finish_reason": "stop", "message": map[string]any{"content": "plain"}}},
+	}
+	if out := openAIToAnthropic(plain); out["stop_reason"] != "end_turn" {
+		t.Errorf("finish=stop without tools → %v, want end_turn", out["stop_reason"])
+	}
+}
+
+// ---- P2-12 流式错误终止 ----
+
+// Responses 流：上游 error 事件 → response.failed，不再伪造成 completed。
+func TestResponsesStreamErrorEmitsFailed(t *testing.T) {
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"error\":{\"message\":\"boom\",\"type\":\"upstream\"}}\n\n")),
+		Header: make(http.Header),
+	}
+	rec := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "responses", Model: "m"}
+
+	chatStreamToResponses(rec, upstream, reqLog, nil)
+
+	out := rec.Body.String()
+	if !strings.Contains(out, "response.failed") {
+		t.Fatalf("should emit response.failed, got %s", out)
+	}
+	if strings.Contains(out, "response.completed") {
+		t.Fatalf("must not emit response.completed after upstream error, got %s", out)
+	}
+	if reqLog.Completed {
+		t.Fatal("request log must be finalized as failed")
+	}
+}
+
+// Anthropic 流：上游 error 事件后不再补发 message_delta/message_stop，日志记 failed。
+func TestAnthropicStreamErrorSkipsEpilogue(t *testing.T) {
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"error\":{\"message\":\"boom\",\"type\":\"upstream\"}}\n\n")),
+		Header: make(http.Header),
+	}
+	rec := httptest.NewRecorder()
+	reqLog := &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "m"}
+
+	acc := &Account{AccountID: "a1", Email: "a@example.com", Status: "active"}
+	handleAnthropicStream(rec, upstream, acc, reqLog)
+
+	out := rec.Body.String()
+	if !strings.Contains(out, "event: error") {
+		t.Fatalf("should emit error event, got %s", out)
+	}
+	if strings.Contains(out, "message_delta") || strings.Contains(out, "message_stop") {
+		t.Fatalf("must not send message_delta/message_stop after upstream error, got %s", out)
+	}
+	if reqLog.Completed {
+		t.Fatal("request log must be finalized as failed")
+	}
+}

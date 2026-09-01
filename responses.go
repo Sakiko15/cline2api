@@ -321,6 +321,25 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 					var obj map[string]any
 					if json.Unmarshal([]byte(payload), &obj) == nil {
 						obj = unwrapDataEnvelope(obj)
+						// 上游 SSE 错误：以 response.failed 终止，不再伪造成 completed（P2-12）
+						if errPayload, ok := obj["error"]; ok && errPayload != nil {
+							errBody, _ := json.Marshal(errPayload)
+							log.Printf("  upstream SSE error (responses): %s", truncate(string(errBody), 300))
+							s.event("response.failed", map[string]any{
+								"type": "response.failed",
+								"response": map[string]any{
+									"id": s.respID, "object": "response", "created_at": time.Now().Unix(),
+									"status": "failed", "model": s.model, "output": []any{}, "error": errPayload,
+								},
+							})
+							if reqLog != nil {
+								if acc != nil && latestUsage.Valid {
+									recordTokenUsage(acc, reqLog.Model, latestUsage)
+								}
+								finalizeRequestLog(reqLog, latestUsage, firstOutputAt, startedAt, false, truncate(string(errBody), 200))
+							}
+							return
+						}
 						if m, ok := obj["model"].(string); ok && m != "" {
 							s.model = m
 						}

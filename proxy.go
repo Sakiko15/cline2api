@@ -1688,16 +1688,23 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 
 	out["content"] = contentBlocks
 
+	stopReason := "end_turn"
 	switch getNested(openAI, "choices", 0, "finish_reason") {
-	case "stop":
-		out["stop_reason"] = "end_turn"
 	case "length":
-		out["stop_reason"] = "max_tokens"
+		stopReason = "max_tokens"
 	case "tool_calls":
-		out["stop_reason"] = "tool_use"
-	default:
-		out["stop_reason"] = "end_turn"
+		stopReason = "tool_use"
 	}
+	// 上游报 stop 但实际给了 tool_calls（部分上游如此）：Anthropic 语义必须 tool_use
+	if stopReason == "end_turn" {
+		for _, b := range contentBlocks {
+			if bm, ok := b.(map[string]any); ok && bm["type"] == "tool_use" {
+				stopReason = "tool_use"
+				break
+			}
+		}
+	}
+	out["stop_reason"] = stopReason
 
 	usage := map[string]any{}
 	if u := getNested(openAI, "usage"); u != nil {
@@ -1783,11 +1790,9 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			out2 := normalizeOpenAIResponse(unwrapDataEnvelope(raw))
 			usage := parseTokenUsage(out2["usage"])
 			finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
+			// openAIToAnthropic 已正确保留文本块并映射 stop_reason（P2-10：
+			// 此前在此整体清空 content，"先说明再调工具"的输出文本全丢）
 			anthropicResp := openAIToAnthropic(out2)
-			if tc, ok := getNested(out2, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
-				anthropicResp["content"] = []any{}
-				anthropicResp["stop_reason"] = "tool_use"
-			}
 			writeJSON(w, http.StatusOK, anthropicResp)
 		}
 		return
@@ -1849,12 +1854,8 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		usage := parseTokenUsage(out["usage"])
 		recordTokenUsage(acc, reqLog.Model, usage)
 		finalizeRequestLog(&reqLog, usage, time.Time{}, reqLog.StartedAt, true, "")
+		// openAIToAnthropic 已正确保留文本块并映射 stop_reason（P2-10）
 		anthropicResp := openAIToAnthropic(out)
-
-		if tc, ok := getNested(out, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
-			anthropicResp["content"] = []any{}
-			anthropicResp["stop_reason"] = "tool_use"
-		}
 
 		writeJSON(w, http.StatusOK, anthropicResp)
 	}
@@ -1891,6 +1892,8 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 
 	msgID := "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli())
 	stopReason := "end_turn"
+	streamErr := false
+	streamErrMsg := ""
 	emit("message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
@@ -2024,6 +2027,8 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			errBody, _ := json.Marshal(errPayload)
 			log.Printf("  upstream SSE error: %s", string(errBody))
 			emit("error", map[string]any{"type": "error", "error": errPayload})
+			streamErr = true
+			streamErrMsg = truncate(string(errBody), 200)
 			break
 		}
 
@@ -2118,6 +2123,14 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 				stopReason = "tool_use"
 			}
 		}
+	}
+
+	// 上游错误：客户端已收到 error 事件，不再补发工具块/message_delta/message_stop，
+	// 请求日志记 failed（P2-12：此前错误后仍补全生命周期事件且日志记成功）
+	if streamErr {
+		recordTokenUsage(acc, reqLog.Model, latestUsage)
+		finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, false, streamErrMsg)
+		return
 	}
 
 	// 流结束：关闭未闭合块；从未 started 的工具块按上游 index 确定性顺序补发完整三段
