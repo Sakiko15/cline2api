@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,6 +17,10 @@ var (
 	poolMu   sync.Mutex
 	poolPath string
 )
+
+// rrCounter 是 round_robin 策略的全局选择计数器（P3-2）：跨过滤列表单调递增、
+// 按当次列表长度取模，冷却集变化不再导致共享游标跳号。仅内存态，重启归零。
+var rrCounter atomic.Uint64
 
 func init() {
 	poolPath = resolveDataPath(".cline-accounts.json")
@@ -404,11 +409,11 @@ func pickAccountForModelWithFallback(model string, fallbackToActive bool) *Accou
 		n := time.Now().UnixNano() % int64(len(eligible))
 		acc = eligible[n]
 	default: // round_robin
-		if p.CurrentIdx >= len(eligible) {
-			p.CurrentIdx = 0
-		}
-		acc = eligible[p.CurrentIdx]
-		p.CurrentIdx = (p.CurrentIdx + 1) % len(eligible)
+		// 全局单调计数器（P3-2）：与过滤列表长度解耦，冷却集变化不再跳号；
+		// CurrentIdx 仅作管理端展示的最后命中下标。
+		idx := int(rrCounter.Add(1)-1) % len(eligible)
+		acc = eligible[idx]
+		p.CurrentIdx = idx
 	}
 	markPoolDirtyLocked()
 	return acc
@@ -434,11 +439,9 @@ func pickAccountLocked(p *AccountPool) *Account {
 		n := time.Now().UnixNano() % int64(len(active))
 		acc = active[n]
 	default:
-		if p.CurrentIdx >= len(active) {
-			p.CurrentIdx = 0
-		}
-		acc = active[p.CurrentIdx]
-		p.CurrentIdx = (p.CurrentIdx + 1) % len(active)
+		idx := int(rrCounter.Add(1)-1) % len(active)
+		acc = active[idx]
+		p.CurrentIdx = idx
 	}
 	markPoolDirtyLocked()
 	return acc

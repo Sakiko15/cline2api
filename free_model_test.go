@@ -459,6 +459,7 @@ func TestCallClineAPIFreeRetriesNextDSAccountAfterQuota429(t *testing.T) {
 		setProxyConfig(oldConfig)
 		httpClient.Transport = oldTransport
 	})
+	rrCounter.Store(0) // 回退挑选顺序依赖列表首元素（P3-2 全局计数器）
 
 	first := &Account{
 		AccountID:   "ds-one",
@@ -737,7 +738,7 @@ func TestPickAccountForModelStrictPreservesStrategy(t *testing.T) {
 
 	for _, strategy := range []string{"fill", "round_robin", "random"} {
 		t.Run(strategy, func(t *testing.T) {
-			pool.CurrentIdx = 0
+			rrCounter.Store(0) // round_robin 现由全局计数器驱动（P3-2）
 			cfg := defaultProxyConfig()
 			cfg.Strategy = strategy
 			setProxyConfig(cfg)
