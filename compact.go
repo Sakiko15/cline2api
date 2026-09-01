@@ -83,8 +83,27 @@ func startCompactCleanup() {
 				}
 			}
 			compactStatesMu.Unlock()
+
+			// P3-14：内存态会话兜底清扫（懒清扫只在各自端点触发，遗漏路径靠这里兜底）
+			oauthSessionsMu.Lock()
+			evictExpiredOAuthSessionsLocked()
+			oauthSessionsMu.Unlock()
+			adminSweepExpiredSessions()
 		}
 	}()
+}
+
+// adminSweepExpiredSessions 清扫过期的管理会话（requireAdminAuth 只懒删被访问的
+// 键，长期未访问的过期键靠周期清扫回收，P3-14）。
+func adminSweepExpiredSessions() {
+	now := time.Now()
+	adminSessionsMu.Lock()
+	for token, expiry := range adminSessions {
+		if now.After(expiry) {
+			delete(adminSessions, token)
+		}
+	}
+	adminSessionsMu.Unlock()
 }
 
 // ============ 消息序列化 ============

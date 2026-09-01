@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var execCommandContext = exec.CommandContext
@@ -105,7 +106,18 @@ func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	cut := maxLen
+	// 回退到 UTF-8 边界（最多退 3 字节），避免把多字节字符拦腰切出 U+FFFD（P3-14）
+	for i := 0; i < 3 && cut > 0; i++ {
+		if utf8.RuneStart(s[cut]) {
+			break
+		}
+		cut--
+	}
+	if !utf8.RuneStart(s[cut]) {
+		cut = 0 // 极端防御：仍不在边界则退到串首
+	}
+	return s[:cut] + "..."
 }
 
 // sanitizeLog 净化日志字段（P3-12）：剥除换行与控制字符防日志注入（伪造日志行），

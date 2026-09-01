@@ -835,6 +835,7 @@ func handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	oauthSessionsMu.Lock()
+	evictExpiredOAuthSessionsLocked() // P3-14：状态查询处懒清扫，未轮询 start 的孤儿会话也能被回收
 	state, ok := oauthSessions[sessionID]
 	if ok {
 		snap := *state // 锁内拷贝快照：后台轮询 goroutine 持锁改写字段（P2-7）
@@ -1622,6 +1623,7 @@ func handleAdminModelDelete(w http.ResponseWriter, r *http.Request) {
 	if p.DefaultModel == req.ID {
 		p.DefaultModel = ""
 	}
+	pruneOrphanModelCooldownsLocked() // P3-14：删模型后清理其残留冷却项
 	poolMu.Unlock()
 	savePool()
 

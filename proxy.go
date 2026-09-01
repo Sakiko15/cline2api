@@ -1471,13 +1471,59 @@ type anthropicReq struct {
 	Extra       map[string]any  `json:"-"`
 }
 
+// overrideFilePath override.md 的解析路径（包级 var 便于测试；与其他数据文件一致
+// 走 resolveDataPath 搜索链，docker 挂载 /app 下仍被 exe/cwd 候选命中）。
+var overrideFilePath = resolveDataPath("override.md")
+
+// overrideMaxBytes override.md 读取上限：超限截断并一次性告警（P3-14）。
+const overrideMaxBytes = 256 << 10
+
+// override.md 的 mtime+size 缓存（P3-14）：未变化只做 os.Stat，不再每请求读盘。
+var (
+	overrideCacheMu   sync.Mutex
+	overrideCacheMod  time.Time
+	overrideCacheSize int64
+	overrideCacheBody string
+	overrideCacheOK   bool // 缓存有效（含「文件不存在」与「文件为空」两态，避免反复读）
+	overrideMissWarn  bool // 首次「不存在」已提示，其后静默
+	overrideCapWarn   bool // 首次「超限截断」已提示
+)
+
+// loadOverrideContent 读取 override.md（mtime+size 缓存；相对路径改为与其他
+// 数据文件一致的 resolveDataPath 解析；256KiB 上限；不存在的提示只打一次）。
 func loadOverrideContent() string {
-	data, err := os.ReadFile("override.md")
+	overrideCacheMu.Lock()
+	defer overrideCacheMu.Unlock()
+
+	fi, err := os.Stat(overrideFilePath)
 	if err != nil {
-		log.Printf("  override.md not found: %v", err)
+		if overrideCacheOK {
+			overrideCacheOK = false // 文件被删除，缓存失效
+		}
+		if !overrideMissWarn {
+			overrideMissWarn = true
+			log.Printf("  override.md not found: %v (suppressing further not-found logs)", err)
+		}
 		return ""
 	}
+	if overrideCacheOK && fi.ModTime().Equal(overrideCacheMod) && fi.Size() == overrideCacheSize {
+		return overrideCacheBody
+	}
+	data, err := os.ReadFile(overrideFilePath)
+	if err != nil {
+		// stat 与 read 之间的竞态（文件被删/权限变化）：视同不存在
+		overrideCacheOK = false
+		return ""
+	}
+	if len(data) > overrideMaxBytes {
+		data = data[:overrideMaxBytes]
+		if !overrideCapWarn {
+			overrideCapWarn = true
+			log.Printf("  override.md exceeds %d bytes, truncated", overrideMaxBytes)
+		}
+	}
 	content := strings.TrimSpace(string(data))
+	overrideCacheMod, overrideCacheSize, overrideCacheBody, overrideCacheOK = fi.ModTime(), fi.Size(), content, true
 	if content != "" {
 		log.Printf("  using override.md as system prompt (%d bytes)", len(content))
 	} else {

@@ -249,6 +249,30 @@ func markAccountCooldown(acc *Account, until time.Time) {
 	poolMu.Unlock()
 }
 
+// pruneOrphanModelCooldownsLocked 删除已不在模型列表中的冷却项（P3-14）：
+// 模型同步替换/删除自定义模型后，残留在账号上的冷却项既不会过期清理入口也不会
+// 再被命中，越积越多。调用方需持 poolMu（且已通过 loadPool 初始化全局池），
+// 返回删除数；>0 时调用方 markPoolDirtyLocked() 或紧随 savePool()。
+func pruneOrphanModelCooldownsLocked() int {
+	if pool == nil {
+		return 0
+	}
+	known := make(map[string]bool, len(pool.Models))
+	for _, m := range pool.Models {
+		known[m.ID] = true
+	}
+	pruned := 0
+	for _, acc := range pool.Accounts {
+		for mid := range acc.ModelCooldowns {
+			if !known[mid] {
+				delete(acc.ModelCooldowns, mid)
+				pruned++
+			}
+		}
+	}
+	return pruned
+}
+
 // markAccountExpired 将账号置为过期态（token 刷新被拒/二次 401）。
 func markAccountExpired(acc *Account) {
 	if acc == nil {

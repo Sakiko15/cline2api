@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ---- P3-1：池/请求日志脏标记+防抖落盘 ----
@@ -929,5 +930,154 @@ func TestAdminAccountTestRequiresExplicitTarget(t *testing.T) {
 	// 指定不存在账号 → 404
 	if rec := post(`{"accountId":"nope"}`); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown accountId = %d, want 404", rec.Code)
+	}
+}
+
+// ---- P3-14：truncate UTF-8 边界 / override.md 缓存与上限 / oauth 清扫 / 孤儿冷却 ----
+
+func TestTruncateKeepsUTF8Boundary(t *testing.T) {
+	s := strings.Repeat("汉", 10) // 30 字节
+	got := truncate(s, 16)
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("truncated string should end with ..., got %q", got)
+	}
+	body := strings.TrimSuffix(got, "...")
+	if strings.ContainsRune(body, utf8.RuneError) {
+		t.Fatalf("truncate split a multibyte char: %q", got)
+	}
+	if n := utf8.RuneCountInString(body); n != 5 {
+		t.Fatalf("kept runes = %d, want 5 (backed off to boundary), got %q", n, got)
+	}
+	// ASCII 行为不变
+	if got := truncate("abcdefgh", 4); got != "abcd..." {
+		t.Fatalf("ascii truncate = %q, want abcd...", got)
+	}
+	if got := truncate("abc", 8); got != "abc" {
+		t.Fatalf("short string must be unchanged, got %q", got)
+	}
+}
+
+func resetOverrideCache() {
+	overrideCacheMu.Lock()
+	overrideCacheOK = false
+	overrideCacheMod = time.Time{}
+	overrideCacheSize = 0
+	overrideCacheBody = ""
+	overrideCacheMu.Unlock()
+}
+
+func TestOverrideCacheReloadOnChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "override.md")
+	oldPath := overrideFilePath
+	overrideFilePath = path
+	resetOverrideCache()
+	t.Cleanup(func() {
+		overrideFilePath = oldPath
+		resetOverrideCache()
+	})
+
+	if err := os.WriteFile(path, []byte("first prompt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadOverrideContent(); got != "first prompt" {
+		t.Fatalf("first load = %q, want first prompt", got)
+	}
+	// 变更（不同 size）→ 重新加载
+	if err := os.WriteFile(path, []byte("second prompt longer"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadOverrideContent(); got != "second prompt longer" {
+		t.Fatalf("reload after change = %q, want second prompt longer", got)
+	}
+	// 未变 → 命中缓存（仍返回同值）
+	if got := loadOverrideContent(); got != "second prompt longer" {
+		t.Fatalf("cached load = %q", got)
+	}
+	// 文件删除 → 空串
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadOverrideContent(); got != "" {
+		t.Fatalf("load after delete = %q, want empty", got)
+	}
+}
+
+func TestOverrideSizeCap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "override.md")
+	oldPath := overrideFilePath
+	overrideFilePath = path
+	resetOverrideCache()
+	t.Cleanup(func() {
+		overrideFilePath = oldPath
+		resetOverrideCache()
+	})
+
+	big := strings.Repeat("a", 300<<10) // 300KiB
+	if err := os.WriteFile(path, []byte(big), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := loadOverrideContent()
+	if len(got) != overrideMaxBytes {
+		t.Fatalf("capped override length = %d, want %d", len(got), overrideMaxBytes)
+	}
+}
+
+func TestOAuthStatusEvictsExpired(t *testing.T) {
+	oldSessions := oauthSessions
+	t.Cleanup(func() { oauthSessions = oldSessions })
+	oauthSessions = map[string]*oauthSessionState{
+		"expired": {DeviceCode: "d1", CreatedAt: time.Now().Add(-2 * oauthSessionTTL)},
+		"valid":   {DeviceCode: "d2", CreatedAt: time.Now()},
+	}
+
+	r := httptest.NewRequest("GET", "http://localhost:3457/admin/api/oauth/status?sessionId=valid", nil)
+	rec := httptest.NewRecorder()
+	handleOAuthStatus(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status for valid session = %d, want 200", rec.Code)
+	}
+
+	oauthSessionsMu.Lock()
+	_, expiredGone := oauthSessions["expired"]
+	_, validKept := oauthSessions["valid"]
+	oauthSessionsMu.Unlock()
+	if expiredGone {
+		t.Fatalf("expired oauth session must be evicted by status query")
+	}
+	if !validKept {
+		t.Fatalf("valid oauth session must be kept")
+	}
+}
+
+func TestPruneOrphanModelCooldownsLocked(t *testing.T) {
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+	future := time.Now().Add(time.Hour)
+	pool = &AccountPool{
+		Keys: []string{},
+		Models: []Model{{ID: "m1", Custom: false}},
+		Accounts: []*Account{{
+			AccountID: "a",
+			ModelCooldowns: map[string]time.Time{
+				"m1": future, // 在册模型 → 保留
+				"m2": future, // 已删除模型 → 孤儿
+			},
+		}},
+	}
+
+	poolMu.Lock()
+	n := pruneOrphanModelCooldownsLocked()
+	poolMu.Unlock()
+	if n != 1 {
+		t.Fatalf("pruned = %d, want 1", n)
+	}
+	cd := loadPool().Accounts[0].ModelCooldowns
+	if _, ok := cd["m1"]; !ok {
+		t.Fatalf("live model cooldown must be kept")
+	}
+	if _, ok := cd["m2"]; ok {
+		t.Fatalf("orphan model cooldown must be pruned")
 	}
 }

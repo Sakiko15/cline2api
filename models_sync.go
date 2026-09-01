@@ -183,6 +183,9 @@ func syncClineModels() modelSyncResult {
 	}
 	kept = append(kept, remote...)
 	p.Models = kept
+	if n := pruneOrphanModelCooldownsLocked(); n > 0 { // P3-14：同步换列表后清理孤儿冷却
+		markPoolDirtyLocked()
+	}
 	res.Total = len(remote)
 	res.Changed = len(res.Added) > 0 || len(res.Removed) > 0
 	poolMu.Unlock()
