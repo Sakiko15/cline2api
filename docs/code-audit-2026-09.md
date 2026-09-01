@@ -151,58 +151,60 @@ proxy.go:1396/1425-1444：单 `toolResult *map[string]any` 每块覆盖 —— �
 
 ### P2 — 中危（16 项，精简）
 
-**P2-1 ✅ 内嵌前端 XSS：`esc()` 不转义引号 + 三处属性/JS 串 sink**
+> **修复状态（2026-09-01）**：16 项 P2 已全部修复于分支 `fix/p2-audit-2026-09`，各含回归测试（p2_fixes_test.go），`go test -race ./...` 通过；P2-11 经 P0-3 闭环（流式块统一 nextBlockIdx 计数 + 收尾按上游 index 排序），P2-13 经 P1-4 闭环（EOF 行先处理再退出）。以下正文保留审计时原貌（§1.1 第 5 步的 freePort 已删除——端口被占用现为拒绝启动并报出占用进程，见 P2-17）。
+
+**P2-1 ✅ [已修复] 内嵌前端 XSS：`esc()` 不转义引号 + 三处属性/JS 串 sink**
 admin_html.go:1191（textContent+innerHTML 序列化只转 `&<>`）；sink：2116（`title="' + esc(l.error)"`，error 含上游 4xx/5xx 原始响应体，proxy.go:784 → request_logs.go:191）、1805（`onclick="deleteModel(\'' + esc(m.id) + '\')"`）、2036（`option value="..."`）。模型 ID 全程无字符白名单。管理面板可导出全部 token，存储 XSS = 完全接管。「假设」子项：上游错误体是否回显含 `"` 的客户端可控串（决定远程可触发性）。修复：esc 补 `"`/`'` 转义；日志错误单元格用 textContent；onclick 改事件委托。
 
-**P2-2 ✅ 未设密码时管理 API 无任何 CSRF 防线**
+**P2-2 ✅ [已修复] 未设密码时管理 API 无任何 CSRF 防线**
 admin.go 全部 30 端点无 Origin/Referer/Content-Type 校验（grep 零命中）；无密码时无 cookie 也可直接调。受害者浏览器以 no-cors POST 即可改密锁死/删号/批导。修复：无密码时限回环；有密码时校验 Origin 同源或加 CSRF token。
 
-**P2-3 ✅ API key 由时间戳生成（可在线爆破）**
+**P2-3 ✅ [已修复] API key 由时间戳生成（可在线爆破）**
 admin.go:902 `cline_%x_%x`（毫秒时间戳 + 毫秒内纳秒 <1e6）+ `==` 非常数时间比较（proxy.go:292-297）+ /v1 无限速。修复：crypto/rand 32B + subtle.ConstantTimeCompare。
 
-**P2-4 ✅ 无 TLS、cookie 无 Secure**
+**P2-4 ✅ [已修复] 无 TLS、cookie 无 Secure**
 admin.go:205-212（HttpOnly/Lax/Path 有，Secure 无，grep 零命中）；绑定 0.0.0.0 时密码/会话/export 全明文。修复：反代为强制前提（手册已有），代码侧 Secure 可配 + 文档声明。
 
-**P2-5 ✅ capture 模式 0644 落盘 + token 上屏**
+**P2-5 ✅ [已修复] capture 模式 0644 落盘 + token 上屏**
 capture.go:166-182（step-*.json 与 full-capture.json 0644，含 Authorization 头与全部 OAuth 响应体）；capture.go:381-399 打印 access/refresh token 到控制台。修复：0600 + 脱敏 + 显式警告。
 
-**P2-6 ✅ `expired` 是终态且瞬时网络故障即可触发**
+**P2-6 ✅ [已修复] `expired` 是终态且瞬时网络故障即可触发**
 pool.go:134-137（refreshAccountToken 任何错误——包括网络抖动——都置 expired）+ proxy.go:833-836（恢复协程 `Status != "cooldown"` 跳过 expired）→ 一次 auth 端点抖动即可让全部在用账号永久失效，只能手工 reset。修复：区分"鉴权拒绝"与"网络错误"；前者才 expired，可选低频探活 expired。
 
-**P2-7 ✅ oauthSessions 读竞争 + 永不清理 + 轮询可永久挂起**
+**P2-7 ✅ [已修复] oauthSessions 读竞争 + 永不清理 + 轮询可永久挂起**
 admin.go:482-500（查表持锁、读 state 字段不持锁，与 410-462 轮询协程的持锁写并发）；map 无 TTL（admin.go:20）；pollWorkosToken 用无超时 client。修复：锁内快照读取；>N 分钟驱逐；带 deadline context。
 
-**P2-8 ✅ 全部请求体/上游错误体无界读取（无 MaxBytesReader）**
+**P2-8 ✅ [已修复] 全部请求体/上游错误体无界读取（无 MaxBytesReader）**
 grep 全仓库零 MaxBytesReader；proxy.go:347/1543、responses.go:464、admin.go ~13 处 `io.ReadAll(r.Body)`；proxy.go:769 cline 错误体无上限读入再截 500（zen 侧有 readAllLimited 64KiB，proxy 侧没有）。10GB POST（无 keys 时无需鉴权）→ OOM。修复：MaxBytesReader(~32MB) + 错误体 LimitReader。
 
-**P2-9 ✅ 上游状态码坍缩：400/401/403/429/5xx → 500；zen 恒 502；上游响应头（Retry-After 等）从不透传**
+**P2-9 ✅ [已修复] 上游状态码坍缩：400/401/403/429/5xx → 500；zen 恒 502；上游响应头（Retry-After 等）从不透传**
 proxy.go:657-662 + 三个 handler 调用点。客户端 SDK 把上游 400 当可重试 500 反复重试注定失败的请求；429 永远到不了客户端 → 退避失效。修复：按 clineAPIError.statusCode 透传 ≥400，429 附带 Retry-After，仅传输层错误给 500。
 
-**P2-10 ✅ Anthropic 非流式：有 tool_calls 时文本被整体清空**
+**P2-10 ✅ [已修复] Anthropic 非流式：有 tool_calls 时文本被整体清空**
 proxy.go:1617-1620、1686-1689 `content = []any{}` 覆盖 openAIToAnthropic 刻意保留的文本块（1488-1493），且无视上游真实 stop_reason 强制 `tool_use`。"先说一句话再调工具" 的输出文本全丢。修复：删掉覆盖，信任转换器。
 
-**P2-11 ✅ 流式 block index 冲突 + 残余工具乱序**
+**P2-11 ✅ [已修复·经 P0-3 闭环] 流式 block index 冲突 + 残余工具乱序**
 proxy.go:1728-1729（textIndex 0 起）与 1843-1846（tool 直接沿用上游 tool_calls[].index=0）→ 文本+工具流出现两个 index 0，违反 Anthropic 流契约；1889-1893 map 迭代顺序不定。修复：工具块用独立递增计数器。
 
-**P2-12 ✅ Responses 流：上游 error 事件被忽略，失败照报成功**
+**P2-12 ✅ [已修复] Responses 流：上游 error 事件被忽略，失败照报成功**
 responses.go:303-338 无 `obj["error"]` 检查（对照 handleAnthropicStream 1791-1796 有）；终态仍发 `response.completed(status=completed)` + 日志 completed=true（379）；Anthropic 流错误后仍补发 message_delta/message_stop 且日志记成功（1895-1906）。修复：错误终态事件 + 日志 failed。
 
-**P2-13 ✅ Anthropic 流丢弃最后一个无换行 SSE 行**
+**P2-13 ✅ [已修复·经 P1-4 闭环] Anthropic 流丢弃最后一个无换行 SSE 行**
 proxy.go:1761-1763 `if err != nil { break }` 在处理 line 之前 —— 截断在记录边界的最后一个 `data:`（常含 usage）被丢；另两条路径顺序正确。修复：先处理后判 err。
 
-**P2-14 ✅ zen/proxy 配置非原子写 + 损坏静默重置**
+**P2-14 ✅ [已修复] zen/proxy 配置非原子写 + 损坏静默重置**
 zen.go:295-296、admin.go:867-872 直接 WriteFile（对照 request_logs 的 tmp+rename）；崩溃写一半 → 重启静默回默认（zen key→public、代理池清空——用户失去限流规避能力而不自知）。修复：统一 tmp+rename + 坏文件 .bad 隔离 + UI 告警。
 
-**P2-15 ✅ 数据目录不可写时静默丢全部持久化**
+**P2-15 ✅ [已修复] 数据目录不可写时静默丢全部持久化**
 savePool/zen/config 写失败只 log（pool.go:91-93 等）；resolveDataPath 优先 exe 目录 —— 装在 Program Files 或只读容器层时**每次保存都失败**：UI 生成的 key、改的密码（鉴权静默回退无鉴权）、冷却/统计全部丢失。修复：启动时探测可写并回退 ~/.cline2api + UI 持久警告。
 
-**P2-16 ✅ 管理端 Headers 可覆盖 Authorization/Content-Type，空键名直写上游**
+**P2-16 ✅ [已修复] 管理端 Headers 可覆盖 Authorization/Content-Type，空键名直写上游**
 proxy.go:620-624 先设 Authorization 再 range cfg.Headers 覆盖；admin.go:998-1003 不校验键名（`""` 键 → Go 构造畸形请求；已实证无 CRLF 注入——net/http 发送时拒绝——但坏值自我 DoS）。修复：黑名单 Authorization/Content-Type/Host + 键名白名单。
 
-**P2-17 ✅ freePort 启动时强杀端口占用进程**
+**P2-17 ✅ [已修复] freePort 启动时强杀端口占用进程**
 proxy.go:2007-2019：127.0.0.1 拨通即 PowerShell `Stop-Process -Force` 端口属主（可能是另一个存有未落盘状态的旧实例，或无关应用）；Linux 无 powershell 静默跳过；只探测回环。修复：拒绝启动并清晰报错，或 SO_REUSEADDR 重试。
 
-**P2-18 ✅ 模型注册表：重复 ID + seed 模型窗口期不可见 + DefaultModel 失效不清除**
+**P2-18 ✅ [已修复] 模型注册表：重复 ID + seed 模型窗口期不可见 + DefaultModel 失效不清除**
 remote/zen 同步只替换各自 Source 桶、从不跨源去重（models_sync.go:162-189、zen.go:716-742）→ /v1/models 可返回重复 id（isFreeModelID 取首个匹配计费，统计可错记）；zen 同步完成前 seed 模型可路由却不在列表；同步删除模型后 p.DefaultModel 不清理（仅 custom 删除路径清）→ 默认模型请求逐次 400。修复：getAllModels 按 ID 去重；同步后校验 DefaultModel 存在性。
 
 ### P3 — 低危（14 项，一行式）
