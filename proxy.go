@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -328,9 +329,9 @@ func startProxy(host string, port int) error {
 
 			valid := false
 			for _, k := range p.Keys {
-				if k == key {
+				// 恒定时间比较且不提前结束，避免按命中时长泄漏 key 前缀（P2-3）
+				if subtle.ConstantTimeCompare([]byte(k), []byte(key)) == 1 {
 					valid = true
-					break
 				}
 			}
 

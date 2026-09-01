@@ -29,6 +29,10 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "管理接口未设置密码，已拒绝非本机访问：请在本机打开后台设置密码，或配置环境变量 CLINE_ADMIN_PASSWORD 后重启",
 		localeEN: "Admin API has no password set; non-loopback access is denied. Open the panel from localhost to set a password, or set the CLINE_ADMIN_PASSWORD environment variable and restart",
 	},
+	"admin_csrf_blocked": {
+		localeZH: "已拒绝跨站请求：请从后台页面本身发起操作",
+		localeEN: "Cross-site request blocked: please initiate actions from the admin panel itself",
+	},
 	"password_not_enabled": {
 		localeZH: "后台未启用密码",
 		localeEN: "Admin password is not enabled",

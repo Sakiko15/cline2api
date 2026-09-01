@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -417,5 +419,151 @@ func TestAnthropicStreamErrorSkipsEpilogue(t *testing.T) {
 	}
 	if reqLog.Completed {
 		t.Fatal("request log must be finalized as failed")
+	}
+}
+// ---- P2-2 CSRF 同源校验 ----
+
+func TestAdminSameOrigin(t *testing.T) {
+	cases := []struct {
+		name    string
+		headers map[string]string
+		host    string
+		want    bool
+	}{
+		{"sec-fetch same-origin", map[string]string{"Sec-Fetch-Site": "same-origin"}, "localhost:3457", true},
+		{"sec-fetch none", map[string]string{"Sec-Fetch-Site": "none"}, "localhost:3457", true},
+		{"sec-fetch cross-site", map[string]string{"Sec-Fetch-Site": "cross-site"}, "localhost:3457", false},
+		{"sec-fetch same-site", map[string]string{"Sec-Fetch-Site": "same-site"}, "localhost:3457", false},
+		{"origin matches", map[string]string{"Origin": "http://localhost:3457"}, "localhost:3457", true},
+		{"origin mismatch", map[string]string{"Origin": "http://evil.example"}, "localhost:3457", false},
+		{"origin null", map[string]string{"Origin": "null"}, "localhost:3457", false},
+		{"referer matches", map[string]string{"Referer": "http://localhost:3457/admin/"}, "localhost:3457", true},
+		{"forwarded host matches", map[string]string{"Origin": "https://api.example.com", "X-Forwarded-Host": "api.example.com"}, "internal:3457", true},
+		{"no headers allows non-browser", nil, "localhost:3457", true},
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest("POST", "http://"+c.host+"/admin/api/login", nil)
+		for k, v := range c.headers {
+			r.Header.Set(k, v)
+		}
+		if got := adminSameOrigin(r); got != c.want {
+			t.Errorf("%s: adminSameOrigin = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// ---- P2-3 key 强随机与鉴权 ----
+
+func TestAdminGenerateKeyIsRandom(t *testing.T) {
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+	pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{}}
+
+	keys := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		handleAdminGenerateKey(rec, httptest.NewRequest("POST", "/admin/api/keys/generate", nil))
+		var resp struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Key string `json:"key"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v (body=%s)", err, rec.Body.String())
+		}
+		key := resp.Data.Key
+		if !strings.HasPrefix(key, "cline_") {
+			t.Fatalf("key %q should carry cline_ prefix", key)
+		}
+		if len(key) != len("cline_")+64 {
+			t.Fatalf("key %q should be cline_ + 64 hex chars", key)
+		}
+		if keys[key] {
+			t.Fatalf("generated keys must be unique, got duplicate %q", key)
+		}
+		keys[key] = true
+	}
+}
+
+// 端到端：存量 key 走常数时间比较后仍能通过鉴权；错误/缺失 key 仍 401。
+func TestAPIKeyAuthAcceptsStoredKey(t *testing.T) {
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+
+	baseURL := protocolTestServer(t)
+	pool = &AccountPool{Accounts: []*Account{}, Keys: []string{"cline_secret0123456789abcdef"}, Models: []Model{}}
+
+	get := func(apiKey string) int {
+		req, _ := http.NewRequest("GET", baseURL+"/v1/models", nil)
+		if apiKey != "" {
+			req.Header.Set("x-api-key", apiKey)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := get("cline_secret0123456789abcdef"); code != http.StatusOK {
+		t.Fatalf("stored key should pass auth and list models, got %d", code)
+	}
+	if code := get("cline_wrong"); code != http.StatusUnauthorized {
+		t.Fatalf("wrong key should be 401, got %d", code)
+	}
+	if code := get(""); code != http.StatusUnauthorized {
+		t.Fatalf("missing key should be 401, got %d", code)
+	}
+}
+
+// ---- P2-4 Secure cookie ----
+
+func TestRequestIsHTTPS(t *testing.T) {
+	r := httptest.NewRequest("GET", "http://x/", nil)
+	if requestIsHTTPS(r) {
+		t.Error("plain http request must not be treated as HTTPS")
+	}
+	r.Header.Set("X-Forwarded-Proto", "https")
+	if !requestIsHTTPS(r) {
+		t.Error("X-Forwarded-Proto: https should be honored")
+	}
+	r.Header.Set("X-Forwarded-Proto", "HTTPS")
+	if !requestIsHTTPS(r) {
+		t.Error("X-Forwarded-Proto comparison should be case-insensitive")
+	}
+	direct := httptest.NewRequest("GET", "http://x/", nil)
+	direct.TLS = &tls.ConnectionState{}
+	if !requestIsHTTPS(direct) {
+		t.Error("r.TLS != nil should be treated as HTTPS")
+	}
+}
+
+func TestAdminLoginCookieSecureFlag(t *testing.T) {
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+	pool = &AccountPool{
+		Accounts: []*Account{}, Keys: []string{}, Models: []Model{},
+		AdminPasswordSalt: "s", AdminPasswordHash: hashAdminPassword("s", "pw"),
+	}
+
+	mkReq := func(xfp string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "http://localhost:3457/admin/api/login",
+			strings.NewReader(`{"password":"pw"}`))
+		r.Header.Set("Content-Type", "application/json")
+		if xfp != "" {
+			r.Header.Set("X-Forwarded-Proto", xfp)
+		}
+		rec := httptest.NewRecorder()
+		handleAdminLogin(rec, r)
+		return rec
+	}
+
+	if rec := mkReq("https"); !strings.Contains(rec.Header().Get("Set-Cookie"), "Secure") {
+		t.Fatalf("HTTPS login should set Secure cookie, got %q", rec.Header().Get("Set-Cookie"))
+	}
+	if rec := mkReq(""); strings.Contains(rec.Header().Get("Set-Cookie"), "Secure") {
+		t.Fatalf("plain HTTP login must not set Secure cookie, got %q", rec.Header().Get("Set-Cookie"))
 	}
 }

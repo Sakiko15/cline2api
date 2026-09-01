@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -106,10 +107,47 @@ func isLoopbackRequest(r *http.Request) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// adminSameOrigin 校验管理面请求的同源性（CSRF 防护，P2-2）。
+// 优先信任浏览器的 Sec-Fetch-Site 头；缺失时回退比较 Origin/Referer 的 host
+// 与请求 Host（反代场景兼顾 X-Forwarded-Host）；两者皆无（curl 等非浏览器）放行。
+func adminSameOrigin(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "same-site", "cross-site":
+		return false
+	}
+	expected := []string{r.Host}
+	if fh := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fh != "" {
+		expected = append(expected, fh)
+	}
+	for _, h := range []string{"Origin", "Referer"} {
+		v := strings.TrimSpace(r.Header.Get(h))
+		if v == "" {
+			continue
+		}
+		u, err := url.Parse(v)
+		if err != nil || u.Host == "" {
+			return false
+		}
+		for _, e := range expected {
+			if strings.EqualFold(u.Host, e) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
 // requireAdminAuth 后台访问鉴权中间件：未设置密码时仅允许本机访问（fail-closed，
 // 防止公网部署在设置密码前暴露管理面——含明文 token 导出），否则校验会话 cookie。
 func requireAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !adminSameOrigin(r) {
+			writeAPI(w, http.StatusForbidden, apiResponse{Error: tAPI(r, "admin_csrf_blocked")})
+			return
+		}
 		if loadPool().AdminPasswordHash == "" {
 			if isLoopbackRequest(r) {
 				next(w, r)
@@ -186,8 +224,20 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// requestIsHTTPS 判断请求是否经由 HTTPS 到达（直连 TLS 或反代转发 X-Forwarded-Proto）。
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+}
+
 // POST /admin/api/login  body: {password}
 func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
+		if !adminSameOrigin(r) {
+			writeAPI(w, http.StatusForbidden, apiResponse{Error: tAPI(r, "admin_csrf_blocked")})
+			return
+		}
 		if r.Method != "POST" {
 			writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 			return
@@ -223,6 +273,7 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    token,
 		Path:     "/admin",
 		HttpOnly: true,
+		Secure:   requestIsHTTPS(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(adminSessionTTL.Seconds()),
 	})
@@ -231,12 +282,17 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 
 	// POST /admin/api/logout
 	func handleAdminLogout(w http.ResponseWriter, r *http.Request) {
+		if !adminSameOrigin(r) {
+			writeAPI(w, http.StatusForbidden, apiResponse{Error: tAPI(r, "admin_csrf_blocked")})
+			return
+		}
 		if c, err := r.Cookie(adminSessionCookie); err == nil {
 			adminSessionsMu.Lock()
 			delete(adminSessions, c.Value)
 			adminSessionsMu.Unlock()
 		}
-		http.SetCookie(w, &http.Cookie{Name: adminSessionCookie, Value: "", Path: "/admin", MaxAge: -1})
+		http.SetCookie(w, &http.Cookie{Name: adminSessionCookie, Value: "", Path: "/admin", MaxAge: -1,
+			HttpOnly: true, Secure: requestIsHTTPS(r)})
 		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "logout_ok")})
 	}
 
@@ -942,7 +998,7 @@ func handleAdminGenerateKey(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	key := fmt.Sprintf("cline_%x_%x", time.Now().UnixMilli(), time.Now().UnixNano()%1000000)
+	key := "cline_" + randomHex(32) // 256-bit 随机，不含时间戳可预测成分（P2-3）
 	p := loadPool()
 	poolMu.Lock()
 	p.Keys = append(p.Keys, key)
