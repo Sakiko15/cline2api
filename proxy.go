@@ -572,14 +572,23 @@ func cleanMessages(messages []any) []any {
 	return cleaned
 }
 
+// clampMaxTokens 防御数值边界：非正数或超出转换安全范围的浮点（int 转换会溢出为负）
+// 一律回落默认值（P1-12）。
+func clampMaxTokens(v float64) int {
+	if v <= 0 || v > 1e9 {
+		return defaultMaxTokens
+	}
+	return int(v)
+}
+
 func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	sessionID := fmt.Sprintf("sess_%d", time.Now().UnixMilli())
 
 	maxTokens := defaultMaxTokens
 	if mt, ok := params["max_tokens"].(float64); ok {
-		maxTokens = int(mt)
+		maxTokens = clampMaxTokens(mt)
 	} else if mt, ok := params["max_completion_tokens"].(float64); ok {
-		maxTokens = int(mt)
+		maxTokens = clampMaxTokens(mt)
 	}
 
 	model := getDefaultModel()
@@ -702,9 +711,15 @@ func callFreeClineAPI(ctx context.Context, params map[string]any, stream bool) (
 				continue
 			}
 			apiErr, ok := err.(*clineAPIError)
-			if !ok || apiErr.statusCode != http.StatusTooManyRequests {
+			if !ok {
 				return nil, usedAcc, err
 			}
+			if apiErr.statusCode >= 500 {
+				// 上游服务端错误：换模型大概率同样失败，中断整链（P1-11）
+				return nil, usedAcc, err
+			}
+			// 4xx（含 429/400/404）：该模型/账号组合被上游拒绝 → 推进下一账号，
+			// 链内账号耗尽后由外层循环尝试下一链模型（P1-11）
 		}
 	}
 	return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
@@ -801,24 +816,37 @@ type accountTestResult struct {
 	Error        string `json:"error,omitempty"`
 }
 
-// parseCooldownUntil 从 429 响应体中解析 "Try again in 1h 1m" 格式的等待时长，
-// 返回预计恢复时间；解析失败则回退到 1 小时后。
-var cooldownRe = regexp.MustCompile(`(?i)try\s+again\s+in\s+(\d+)\s*h?(?:\s*(\d+))?\s*m?`)
+// parseCooldownUntil 从 429 响应体中解析等待时长，支持 "1h 1m"、"2h"、"45m" 格式。
+// 分钟-only 文本曾被误读为小时（45m→45h，P1-8）；结果钳制到 [1m, 24h]，
+// 解析失败或 0h 0m 回退 1 小时。
+var (
+	cooldownHoursRe   = regexp.MustCompile(`(?i)try\s+again\s+in\s+(\d+)\s*h(?:\s*(\d+)\s*m?)?`)
+	cooldownMinutesRe = regexp.MustCompile(`(?i)try\s+again\s+in\s+(\d+)\s*m\b`)
+)
 
 func parseCooldownUntil(body string) time.Time {
-	matches := cooldownRe.FindStringSubmatch(body)
-	if len(matches) >= 2 {
-		hours, _ := strconv.Atoi(matches[1])
+	var d time.Duration
+	if m := cooldownHoursRe.FindStringSubmatch(body); m != nil {
+		hours, _ := strconv.Atoi(m[1])
+		if hours > 24 {
+			hours = 24 // 预钳制，防止大数乘法让 time.Duration 溢出回绕
+		}
 		minutes := 0
-		if len(matches) >= 3 && matches[2] != "" {
-			minutes, _ = strconv.Atoi(matches[2])
+		if len(m) >= 3 && m[2] != "" {
+			minutes, _ = strconv.Atoi(m[2])
 		}
-		if hours > 0 || minutes > 0 {
-			return time.Now().Add(time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute)
-		}
+		d = time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute
+	} else if m := cooldownMinutesRe.FindStringSubmatch(body); m != nil {
+		minutes, _ := strconv.Atoi(m[1])
+		d = time.Duration(minutes) * time.Minute
 	}
-	// 解析失败，回退 1 小时
-	return time.Now().Add(1 * time.Hour)
+	if d <= 0 {
+		d = time.Hour // 解析失败或 0h 0m
+	}
+	if d > 24*time.Hour {
+		d = 24 * time.Hour
+	}
+	return time.Now().Add(d)
 }
 
 // startCooldownRecovery 启动后台 goroutine，每 30 秒检查一次 cooldown 账号，
@@ -929,7 +957,8 @@ func parseTokenUsage(value any) tokenUsage {
 	}
 	read := func(keys ...string) int64 {
 		for _, key := range keys {
-			if value, ok := usage[key].(float64); ok && value >= 0 {
+			// 上限 1e15：超过该量级的浮点转 int64 会溢出为负（P1-12）
+			if value, ok := usage[key].(float64); ok && value >= 0 && value <= 1e15 {
 				return int64(value)
 			}
 		}
@@ -1475,15 +1504,14 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 		"model": getNested(openAI, "model"),
 	}
 
-	choices := getNested(openAI, "choices")
-	if choices == nil {
+	// 安全断言：{"choices":[]} / {"choices":[null]} 等异常上游响应不得 panic（P1-6）
+	choice0, _ := getNested(openAI, "choices", 0).(map[string]any)
+	if choice0 == nil {
 		out["content"] = []any{map[string]any{"type": "text", "text": ""}}
 		out["stop_reason"] = "end_turn"
 		out["usage"] = map[string]any{"input_tokens": 0, "output_tokens": 0}
 		return out
 	}
-
-	choice0 := getNested(openAI, "choices", 0).(map[string]any)
 	msg, _ := choice0["message"].(map[string]any)
 	if msg == nil {
 		msg, _ = choice0["delta"].(map[string]any)
@@ -1577,7 +1605,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.MaxTokens == 0 {
+	if req.MaxTokens <= 0 {
 		req.MaxTokens = defaultMaxTokens
 	}
 
