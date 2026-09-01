@@ -408,6 +408,24 @@ func parseRetryAfter(h string) time.Duration {
 	return 0
 }
 
+const (
+	// maxRetryWait 单次重试等待上限：防止上游超大 Retry-After 长期占用并发槽（P1-2）
+	maxRetryWait = 30 * time.Second
+	// maxProxyCooldown 出口代理冷却上限
+	maxProxyCooldown = time.Hour
+)
+
+// clampRetryWait 钳制等待时长（d<=0 原样返回 0；超出 max 截断）。
+func clampRetryWait(d, max time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	if d > max {
+		return max
+	}
+	return d
+}
+
 // validateProxyList 校验代理列表格式：支持 http/https/socks5/socks5h，必须含 host:port。
 func validateProxyList(proxies []string) error {
 	for _, p := range proxies {
@@ -562,7 +580,9 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 			// 网络错误：退避重试（不计入故障转移，瞬时可恢复）
 			if attempt < retries {
 				log.Printf("  zen network error (%v), retry %d/%d after %v", err, attempt+1, retries, delay)
+				<-sem // 睡眠期释放并发槽，避免黑洞上游占满信号量（P1-2）
 				time.Sleep(withRetryJitter(delay))
+				sem <- struct{}{}
 				delay *= 2
 				continue
 			}
@@ -578,9 +598,9 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 		reason := fmt.Sprintf("zen API %d: %s", resp.StatusCode, truncate(string(bodyBytes), 500))
 
 		if isRateLimited(resp.StatusCode, string(bodyBytes)) {
-			// 冷却当前出口代理（Retry-After 优先，默认 10 分钟）
+			// 冷却当前出口代理（Retry-After 优先，默认 10 分钟；钳制上限 1h）
 			if idx := lastZenProxyIdx(); idx >= 0 {
-				d := parseRetryAfter(resp.Header.Get("Retry-After"))
+				d := clampRetryWait(parseRetryAfter(resp.Header.Get("Retry-After")), maxProxyCooldown)
 				if d <= 0 {
 					d = 10 * time.Minute
 				}
@@ -588,11 +608,13 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 			}
 			if attempt < retries {
 				wait := delay
-				if ra := parseRetryAfter(resp.Header.Get("Retry-After")); ra > wait {
+				if ra := clampRetryWait(parseRetryAfter(resp.Header.Get("Retry-After")), maxRetryWait); ra > wait {
 					wait = ra
 				}
 				log.Printf("  zen rate limited (%d), retry %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
+				<-sem // 睡眠期释放并发槽（P1-2）
 				time.Sleep(withRetryJitter(wait))
+				sem <- struct{}{}
 				delay *= 2
 				continue
 			}
