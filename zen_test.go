@@ -27,6 +27,10 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
+	// 防抖 flusher（C1）在 m.Run() 返回后仍可能有一笔 pending/in-flight 落盘，
+	// 先静默化两个 flusher 再恢复路径变量，避免与其竞争（go test -race 实测）。
+	poolDebouncer.drain()
+	requestLogsDebouncer.drain()
 	poolPath, requestLogsPath = oldPoolPath, oldLogsPath
 	os.RemoveAll(tmp)
 	os.Exit(code)

@@ -15,20 +15,25 @@ import (
 // （如 poolMu），而 schedule() 在持调用方锁时被调；若 fn 在 d.mu 内执行，
 // 将形成 d.mu→poolMu 与 poolMu→d.mu 的锁序倒置死锁。
 type debouncedFlush struct {
-	mu    sync.Mutex
-	timer *time.Timer
-	delay time.Duration
-	fn    func()
+	mu      sync.Mutex
+	cond    *sync.Cond
+	timer   *time.Timer
+	running bool // fire 正在执行 fn，供 drain 等待
+	stopped bool // drain 之后永久停用
+	delay   time.Duration
+	fn      func()
 }
 
 func newDebouncedFlush(delay time.Duration, fn func()) *debouncedFlush {
-	return &debouncedFlush{delay: delay, fn: fn}
+	d := &debouncedFlush{delay: delay, fn: fn}
+	d.cond = sync.NewCond(&d.mu)
+	return d
 }
 
 // schedule 排程一次落盘；已有 pending timer 时不重置（防饿死）。
 func (d *debouncedFlush) schedule() {
 	d.mu.Lock()
-	if d.timer != nil {
+	if d.timer != nil || d.stopped {
 		d.mu.Unlock()
 		return
 	}
@@ -40,6 +45,32 @@ func (d *debouncedFlush) schedule() {
 func (d *debouncedFlush) fire() {
 	d.mu.Lock()
 	d.timer = nil
+	if d.stopped {
+		d.mu.Unlock()
+		return
+	}
+	d.running = true
 	d.mu.Unlock()
 	d.fn()
+	d.mu.Lock()
+	d.running = false
+	d.cond.Broadcast()
+	d.mu.Unlock()
+}
+
+// drain 停止排程并等待 in-flight 的 fn 执行完毕；之后该实例不再执行 fn。
+// 用于全局 teardown（测试 TestMain 恢复 poolPath 等路径变量）前静默化：
+// AfterFunc 已弹出但 fire 尚未运行的窗口由 stopped 标记兜底——即便
+// timer.Stop() 返回 false，fire 也会看到 stopped 直接返回，不执行 fn。
+func (d *debouncedFlush) drain() {
+	d.mu.Lock()
+	d.stopped = true
+	if d.timer != nil {
+		d.timer.Stop()
+		d.timer = nil
+	}
+	for d.running {
+		d.cond.Wait()
+	}
+	d.mu.Unlock()
 }
