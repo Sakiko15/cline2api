@@ -150,10 +150,18 @@ func restartListener(host string, port int) error {
 	// （P1-9：旧实现先 Shutdown 再 ListenAndServe，绑定失败会导致零监听、全代理下线）
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		// 同端口换地址等场景：端口仍被旧监听自身占用 → 停旧后重试一次
+		// 同端口换地址等场景：端口仍被旧监听自身占用 → 停旧后重试。
+		// Windows 上 Shutdown 关闭 listener 后 socket 释放是异步的，立即重绑
+		// 仍可能 EADDRINUSE，故带短暂退避重试数次。
 		shutdownOld()
 		old = nil
-		ln, err = net.Listen("tcp", addr)
+		for i := 0; i < 10; i++ {
+			time.Sleep(50 * time.Millisecond)
+			ln, err = net.Listen("tcp", addr)
+			if err == nil {
+				break
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("bind %s: %w", addr, err)
 		}
