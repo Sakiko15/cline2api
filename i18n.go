@@ -57,6 +57,18 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "失败次数过多，请稍后再试",
 		localeEN: "Too many failed attempts, try again later",
 	},
+	"old_password_required": {
+		localeZH: "必须提供当前密码",
+		localeEN: "Current password is required",
+	},
+	"password_required": {
+		localeZH: "必须提供新密码",
+		localeEN: "New password is required",
+	},
+	"internal_error": {
+		localeZH: "内部错误，请稍后再试",
+		localeEN: "Internal error, try again later",
+	},
 	"login_ok": {
 		localeZH: "登录成功",
 		localeEN: "Signed in",

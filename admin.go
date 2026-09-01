@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -316,42 +318,122 @@ func requireAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // hashAdminPassword 生成加盐密码哈希：hex(sha256(salt+password))。
+// 仅用于存量 legacy 格式（P3-8 迁移前），新密码一律走 newAdminPasswordHash。
 func hashAdminPassword(saltHex, password string) string {
 	sum := sha256.Sum256([]byte(saltHex + password))
 	return hex.EncodeToString(sum[:])
 }
 
-// setAdminPassword 设置/修改/清除后台密码（空 = 清除），并清空所有会话强制重新登录。
-func setAdminPassword(password string) {
+// adminPasswordHashPrefix 标记 PBKDF2 自包含哈希格式：pbkdf2-sha256$<iter>$<saltHex>$<hashHex>。
+const adminPasswordHashPrefix = "pbkdf2-sha256$"
+
+// adminPBKDF2Iterations PBKDF2 迭代次数（OWASP 2023 下限 600k，约 100-200ms/次）。
+var adminPBKDF2Iterations = 600000
+
+// newAdminPasswordHash 为密码生成 PBKDF2 哈希（自包含单字段，AdminPasswordSalt 置空）。
+// 随机数或 KDF 失败返回 error（fail-closed，绝不回退到弱哈希）。
+func newAdminPasswordHash(password string) (hash, salt string, err error) {
+	saltBytes := make([]byte, 16)
+	if _, err := rand.Read(saltBytes); err != nil {
+		return "", "", fmt.Errorf("generate salt: %w", err)
+	}
+	key, err := pbkdf2.Key(sha256.New, password, saltBytes, adminPBKDF2Iterations, sha256.Size)
+	if err != nil {
+		return "", "", fmt.Errorf("derive password hash: %w", err)
+	}
+	hash = fmt.Sprintf("%s%d$%s$%s", adminPasswordHashPrefix, adminPBKDF2Iterations,
+		hex.EncodeToString(saltBytes), hex.EncodeToString(key))
+	return hash, "", nil
+}
+
+// verifyPBKDF2Hash 校验 pbkdf2-sha256$<iter>$<saltHex>$<hashHex> 格式哈希（常量时间比较）。
+// 迭代次数/盐/哈希任一解析失败即拒绝；迭代次数设上界防数据文件损坏导致的 KDF 拖垮登录。
+func verifyPBKDF2Hash(stored, password string) bool {
+	parts := strings.Split(stored, "$")
+	if len(parts) != 4 || parts[0] != "pbkdf2-sha256" {
+		return false
+	}
+	iter, err := strconv.Atoi(parts[1])
+	if err != nil || iter <= 0 || iter > 10_000_000 {
+		return false
+	}
+	salt, err := hex.DecodeString(parts[2])
+	if err != nil || len(salt) == 0 {
+		return false
+	}
+	want, err := hex.DecodeString(parts[3])
+	if err != nil || len(want) == 0 {
+		return false
+	}
+	got, err := pbkdf2.Key(sha256.New, password, salt, iter, len(want))
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+// setAdminPassword 设置/修改/清除后台密码（空 = 清除，仅供 Go 内部调用；HTTP 入口
+// 已移除清除路径），并清空所有会话强制重新登录。PBKDF2 格式（P3-8）；
+// 随机数/KDF 失败返回 error 且不改动现有哈希（fail-closed）。
+func setAdminPassword(password string) error {
+	newHash := ""
+	if password != "" {
+		h, _, err := newAdminPasswordHash(password) // KDF 在锁外（100-200ms 不能持锁）
+		if err != nil {
+			return err
+		}
+		newHash = h
+	}
 	p := loadPool()
 	poolMu.Lock()
-	if password == "" {
-		p.AdminPasswordHash = ""
-		p.AdminPasswordSalt = ""
-	} else {
-		salt := make([]byte, 16)
-		if _, err := rand.Read(salt); err != nil {
-			salt = []byte(time.Now().Format("20060102150405"))
-		}
-		p.AdminPasswordSalt = hex.EncodeToString(salt)
-		p.AdminPasswordHash = hashAdminPassword(p.AdminPasswordSalt, password)
-	}
+	p.AdminPasswordHash = newHash
+	p.AdminPasswordSalt = ""
 	poolMu.Unlock()
 	savePool()
 	adminSessionsMu.Lock()
 	adminSessions = make(map[string]time.Time)
 	adminSessionsMu.Unlock()
+	return nil
 }
 
 // verifyAdminPassword 校验后台密码（未设置密码时返回 false）。
-func verifyAdminPassword(password string) bool {
+// 双格式兼容：PBKDF2 自包含格式或存量单轮 SHA-256（legacy）。
+// legacy 比较改用常量时间比较（P3-6）。KDF/哈希计算在 poolMu 外。
+// 返回值 legacy 表示存量哈希仍是旧格式（调用方可择机迁移）。
+func verifyAdminPassword(password string) (ok bool, legacy bool) {
 	p := loadPool()
 	poolMu.Lock()
-	defer poolMu.Unlock()
-	if p.AdminPasswordHash == "" {
-		return false
+	storedHash, storedSalt := p.AdminPasswordHash, p.AdminPasswordSalt
+	poolMu.Unlock()
+	if storedHash == "" {
+		return false, false
 	}
-	return hashAdminPassword(p.AdminPasswordSalt, password) == p.AdminPasswordHash
+	if strings.HasPrefix(storedHash, adminPasswordHashPrefix) {
+		return verifyPBKDF2Hash(storedHash, password), false
+	}
+	got := []byte(hashAdminPassword(storedSalt, password))
+	return subtle.ConstantTimeCompare(got, []byte(storedHash)) == 1, true
+}
+
+// upgradeAdminPasswordHash 将存量单轮 SHA-256 哈希透明迁移为 PBKDF2（登录成功后调用）。
+// KDF 在锁外计算；入锁后复查仍为 legacy 才写回（幂等，并发登录只迁移一次）。
+func upgradeAdminPasswordHash(password string) {
+	hash, _, err := newAdminPasswordHash(password)
+	if err != nil {
+		log.Printf("admin password hash upgrade skipped: %v", err)
+		return
+	}
+	p := loadPool()
+	poolMu.Lock()
+	if p.AdminPasswordHash == "" || strings.HasPrefix(p.AdminPasswordHash, adminPasswordHashPrefix) {
+		poolMu.Unlock()
+		return
+	}
+	p.AdminPasswordHash = hash
+	p.AdminPasswordSalt = ""
+	poolMu.Unlock()
+	savePool()
+	log.Printf("admin password hash upgraded to PBKDF2")
 }
 
 // randomHex 生成 n 字节随机数的 hex 字符串。
@@ -427,13 +509,17 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 			writeAPI(w, http.StatusTooManyRequests, apiResponse{Error: tAPI(r, "too_many_attempts")})
 			return
 		}
-		if !verifyAdminPassword(req.Password) {
+		ok, legacy := verifyAdminPassword(req.Password)
+		if !ok {
 			recordLoginFailure(ip)
 			time.Sleep(loginFailureDelay) // 防爆破（未触发锁定时的额外摩擦）
 			writeAPI(w, http.StatusUnauthorized, apiResponse{Error: tAPI(r, "wrong_password")})
 			return
 		}
 		clearLoginFailures(ip)
+		if legacy { // P3-8：存量单轮 SHA-256 哈希在首次成功登录时透明迁移
+			upgradeAdminPasswordHash(req.Password)
+		}
 	token := randomHex(32)
 	adminSessionsMu.Lock()
 	adminSessions[token] = time.Now().Add(adminSessionTTL)
@@ -470,7 +556,8 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "logout_ok")})
 	}
 
-// POST /admin/api/password  body: {password}（空 = 清除密码，恢复无密码访问）
+// POST /admin/api/password  body: {oldPassword, password}
+// 已设密码时必须携带并匹配当前密码（P3-8）；空新密码 400 拒绝（清除密码入口已移除）。
 func handleAdminPassword(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
@@ -482,18 +569,32 @@ func handleAdminPassword(w http.ResponseWriter, r *http.Request) {
 		}
 		defer r.Body.Close()
 		var req struct {
-			Password string `json:"password"`
+			OldPassword string `json:"oldPassword"`
+			Password    string `json:"password"`
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
 			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
 			return
 		}
-		setAdminPassword(req.Password)
-		if req.Password == "" {
-			writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "password_cleared")})
-		} else {
-			writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "password_updated")})
+		if req.Password == "" { // P3-8：留空清除密码的入口移除，空新密码一律拒绝
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "password_required")})
+			return
 		}
+		if loadPool().AdminPasswordHash != "" { // 已设密码：改密需验证当前密码
+			if req.OldPassword == "" {
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "old_password_required")})
+				return
+			}
+			if ok, _ := verifyAdminPassword(req.OldPassword); !ok {
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "wrong_password")})
+				return
+			}
+		}
+		if err := setAdminPassword(req.Password); err != nil {
+			writeAPI(w, http.StatusInternalServerError, apiResponse{Error: tAPI(r, "internal_error")})
+			return
+		}
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: tAPI(r, "password_updated")})
 }
 
 func adminStaticHandler(w http.ResponseWriter, r *http.Request) {

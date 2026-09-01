@@ -595,11 +595,14 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
       <div class="form-row" style="margin-top:12px">
         <div class="field" style="flex:1">
           <label>管理后台密码（<span id="passwordStatus">未启用</span>）</label>
-          <div style="display:flex;gap:8px">
-            <input type="password" id="settingPassword" placeholder="留空保存 = 清除密码" autocomplete="new-password" style="flex:1">
+          <div style="display:flex;gap:8px;margin-top:4px">
+            <input type="password" id="settingOldPassword" placeholder="当前密码（已启用时必填）" autocomplete="current-password" style="flex:1">
+          </div>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <input type="password" id="settingPassword" placeholder="新密码" autocomplete="new-password" style="flex:1">
             <button class="btn btn-primary" onclick="savePassword()">保存</button>
           </div>
-          <div style="font-size:12px;color:var(--text3);margin-top:4px">设置后访问管理后台需输入密码，默认无密码</div>
+          <div style="font-size:12px;color:var(--text3);margin-top:4px">设置后访问管理后台需输入密码；修改密码需先输入当前密码</div>
         </div>
       </div>
     </div>
@@ -1052,7 +1055,7 @@ const I18N = {
   '保存失败: ': 'Save failed: ',
   '密码至少 4 位': 'Password must be at least 4 characters',
   '密码已设置，后台需要重新登录': 'Password set; admin requires re-login',
-  '已清除密码': 'Password cleared',
+  '请输入新密码': 'Enter a new password',
   '存在有值无键的行，已忽略': 'Rows with a value but no key were ignored',
   '请求头已保存': 'Headers saved',
   '加载失败': 'Failed to load',
@@ -1748,14 +1751,17 @@ async function saveListenHost() {
   } catch (e) { toast(t('保存失败: ') + e.message, 'error'); }
 }
 
-// 保存/清除管理后台密码（留空 = 清除）
+// 保存管理后台密码（修改需当前密码；启用后不支持留空清除）
 async function savePassword() {
+  const oldPwd = _('settingOldPassword').value;
   const pwd = _('settingPassword').value;
-  if (pwd && pwd.length < 4) { toast(t('密码至少 4 位'), 'error'); return; }
+  if (!pwd) { toast(t('请输入新密码'), 'error'); return; }
+  if (pwd.length < 4) { toast(t('密码至少 4 位'), 'error'); return; }
   try {
-    await api('POST', '/password', { password: pwd });
+    await api('POST', '/password', { oldPassword: oldPwd, password: pwd });
+    _('settingOldPassword').value = '';
     _('settingPassword').value = '';
-    toast(pwd ? t('密码已设置，后台需要重新登录') : t('已清除密码'), 'success');
+    toast(t('密码已设置，后台需要重新登录'), 'success');
     await loadConfig();
   } catch (e) { toast(t('保存失败: ') + e.message, 'error'); }
 }

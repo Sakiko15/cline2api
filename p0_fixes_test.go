@@ -227,7 +227,7 @@ func TestAnthropicStreamTextAndToolIndexes(t *testing.T) {
 // TestRequireAdminAuthFailClosed 验证 P0-4：未设密码时仅本机可访问管理 API。
 func TestRequireAdminAuthFailClosed(t *testing.T) {
 	resetAdmin := func() {
-		setAdminPassword("")
+		_ = setAdminPassword("")
 	}
 	resetAdmin()
 	t.Cleanup(resetAdmin)
@@ -258,7 +258,9 @@ func TestRequireAdminAuthFailClosed(t *testing.T) {
 	}
 
 	// 已设密码：非回环且无会话 → 仍为 401（原有行为不变）
-	setAdminPassword("secret")
+	if err := setAdminPassword("secret"); err != nil {
+		t.Fatal(err)
+	}
 	req = httptest.NewRequest(http.MethodGet, "/admin/api/stats", nil)
 	rec = httptest.NewRecorder()
 	handler(rec, req)

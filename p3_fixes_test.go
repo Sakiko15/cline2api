@@ -471,3 +471,180 @@ func TestAppendRequestLogDeferredPersist(t *testing.T) {
 		t.Fatalf("flushRequestLogsDirty must persist appended entry")
 	}
 }
+
+// ---- P3-6/P3-8：后台密码 PBKDF2 与改密校验 ----
+
+func shrinkPBKDF2(t *testing.T) {
+	t.Helper()
+	old := adminPBKDF2Iterations
+	adminPBKDF2Iterations = 1000
+	t.Cleanup(func() { adminPBKDF2Iterations = old })
+}
+
+func TestAdminPasswordPBKDF2RoundTrip(t *testing.T) {
+	shrinkPBKDF2(t)
+	hash, salt, err := newAdminPasswordHash("s3cret!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if salt != "" {
+		t.Fatalf("new-format salt must be empty, got %q", salt)
+	}
+	if !strings.HasPrefix(hash, adminPasswordHashPrefix) {
+		t.Fatalf("hash = %q, want pbkdf2 prefix", hash)
+	}
+	if !verifyPBKDF2Hash(hash, "s3cret!") {
+		t.Fatalf("correct password must verify")
+	}
+	if verifyPBKDF2Hash(hash, "wrong") {
+		t.Fatalf("wrong password must not verify")
+	}
+}
+
+func TestVerifyAdminPasswordLegacyFormat(t *testing.T) {
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+	pool = &AccountPool{
+		Accounts: []*Account{}, Keys: []string{}, Models: []Model{},
+		AdminPasswordSalt: "s", AdminPasswordHash: hashAdminPassword("s", "pw"),
+	}
+	if ok, legacy := verifyAdminPassword("pw"); !ok || !legacy {
+		t.Fatalf("legacy password: ok=%v legacy=%v, want true/true", ok, legacy)
+	}
+	if ok, _ := verifyAdminPassword("nope"); ok {
+		t.Fatalf("wrong password must not verify")
+	}
+}
+
+func TestAdminLoginMigratesLegacyHash(t *testing.T) {
+	shrinkPBKDF2(t)
+	oldPool := pool
+	oldDelay := loginFailureDelay
+	loginFailureDelay = time.Millisecond
+	t.Cleanup(func() {
+		pool = oldPool
+		loginFailureDelay = oldDelay
+		resetLoginAttempts()
+	})
+	pool = &AccountPool{
+		Accounts: []*Account{}, Keys: []string{}, Models: []Model{},
+		AdminPasswordSalt: "s", AdminPasswordHash: hashAdminPassword("s", "pw"),
+	}
+	resetLoginAttempts()
+
+	if rec := postLogin("pw"); rec.Code != http.StatusOK {
+		t.Fatalf("legacy login = %d, want 200", rec.Code)
+	}
+	p := loadPool()
+	if !strings.HasPrefix(p.AdminPasswordHash, adminPasswordHashPrefix) {
+		t.Fatalf("hash not migrated after login: %q", p.AdminPasswordHash)
+	}
+	if p.AdminPasswordSalt != "" {
+		t.Fatalf("salt must be cleared after migration, got %q", p.AdminPasswordSalt)
+	}
+	if ok, legacy := verifyAdminPassword("pw"); !ok || legacy {
+		t.Fatalf("post-migration verify: ok=%v legacy=%v, want true/false", ok, legacy)
+	}
+	if ok, _ := verifyAdminPassword("wrong"); ok {
+		t.Fatalf("wrong password must not verify after migration")
+	}
+}
+
+func passwordPost(body string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("POST", "http://localhost:3457/admin/api/password", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handleAdminPassword(rec, r)
+	return rec
+}
+
+func TestAdminPasswordChangeRequiresOldPassword(t *testing.T) {
+	shrinkPBKDF2(t)
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+	pool = &AccountPool{
+		Accounts: []*Account{}, Keys: []string{}, Models: []Model{},
+		AdminPasswordSalt: "s", AdminPasswordHash: hashAdminPassword("s", "pw"),
+	}
+	legacyHash := pool.AdminPasswordHash
+
+	// 缺旧密码 → 400
+	if rec := passwordPost(`{"password":"newpass"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing oldPassword = %d, want 400", rec.Code)
+	}
+	// 旧密码错误 → 400，哈希不变
+	if rec := passwordPost(`{"oldPassword":"bad","password":"newpass"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("wrong oldPassword = %d, want 400", rec.Code)
+	}
+	if loadPool().AdminPasswordHash != legacyHash {
+		t.Fatalf("failed change must not touch hash")
+	}
+	// 旧密码正确 → 200，哈希迁移为 PBKDF2，会话被清空
+	adminSessionsMu.Lock()
+	adminSessions["stale"] = time.Now().Add(time.Hour)
+	adminSessionsMu.Unlock()
+	if rec := passwordPost(`{"oldPassword":"pw","password":"newpass"}`); rec.Code != http.StatusOK {
+		t.Fatalf("valid change = %d, want 200", rec.Code)
+	}
+	if !strings.HasPrefix(loadPool().AdminPasswordHash, adminPasswordHashPrefix) {
+		t.Fatalf("hash after change = %q, want pbkdf2", loadPool().AdminPasswordHash)
+	}
+	adminSessionsMu.Lock()
+	sessions := len(adminSessions)
+	adminSessionsMu.Unlock()
+	if sessions != 0 {
+		t.Fatalf("password change must clear sessions, %d left", sessions)
+	}
+	if ok, _ := verifyAdminPassword("newpass"); !ok {
+		t.Fatalf("new password must verify")
+	}
+}
+
+func TestAdminPasswordEmptyRejected(t *testing.T) {
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+	pool = &AccountPool{
+		Accounts: []*Account{}, Keys: []string{}, Models: []Model{},
+		AdminPasswordSalt: "s", AdminPasswordHash: hashAdminPassword("s", "pw"),
+	}
+	legacyHash := pool.AdminPasswordHash
+
+	// 空新密码（无论是否带旧密码）→ 400，哈希不变
+	if rec := passwordPost(`{"oldPassword":"pw","password":""}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty password with old = %d, want 400", rec.Code)
+	}
+	if rec := passwordPost(`{}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty body = %d, want 400", rec.Code)
+	}
+	if loadPool().AdminPasswordHash != legacyHash {
+		t.Fatalf("rejected change must not touch hash")
+	}
+}
+
+func TestSetAdminPasswordUsesPBKDF2(t *testing.T) {
+	shrinkPBKDF2(t)
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+	pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{}}
+
+	if err := setAdminPassword("hunter2"); err != nil {
+		t.Fatal(err)
+	}
+	p := loadPool()
+	if !strings.HasPrefix(p.AdminPasswordHash, adminPasswordHashPrefix) {
+		t.Fatalf("hash = %q, want pbkdf2 prefix", p.AdminPasswordHash)
+	}
+	if p.AdminPasswordSalt != "" {
+		t.Fatalf("salt = %q, want empty for new format", p.AdminPasswordSalt)
+	}
+	if ok, legacy := verifyAdminPassword("hunter2"); !ok || legacy {
+		t.Fatalf("verify: ok=%v legacy=%v, want true/false", ok, legacy)
+	}
+	// Go 内部清除路径仍可用（HTTP 入口已移除）
+	if err := setAdminPassword(""); err != nil {
+		t.Fatal(err)
+	}
+	if loadPool().AdminPasswordHash != "" {
+		t.Fatalf("clear must empty hash")
+	}
+}
