@@ -242,8 +242,9 @@ func defaultZenConfig() *zenConfigData {
 }
 
 var (
-	zenConfig   *zenConfigData
-	zenConfigMu sync.Mutex
+	zenConfig     *zenConfigData
+	zenConfigMu   sync.Mutex
+	zenConfigPath = resolveDataPath(".cline-zen.json")
 )
 
 // getZenConfig 惰性加载配置（避免依赖包初始化顺序）。
@@ -252,9 +253,10 @@ func getZenConfig() *zenConfigData {
 	defer zenConfigMu.Unlock()
 	if zenConfig == nil {
 		cfg := defaultZenConfig()
-		if data, err := os.ReadFile(resolveDataPath(".cline-zen.json")); err == nil {
+		if data, err := os.ReadFile(zenConfigPath); err == nil {
 			if err := json.Unmarshal(data, cfg); err != nil {
-				log.Printf("zen config parse failed: %v", err)
+				// 坏文件隔离：否则下次保存会用默认值覆盖销毁原始配置
+				quarantineFile(zenConfigPath, err)
 			}
 		}
 		if cfg.Key == "" {
@@ -294,7 +296,7 @@ func setZenConfig(c *zenConfigData) {
 	zenConfigMu.Unlock()
 
 	data, _ := json.MarshalIndent(c, "", "  ")
-	if err := os.WriteFile(resolveDataPath(".cline-zen.json"), data, 0600); err != nil {
+	if err := writeFileAtomic(zenConfigPath, data, 0600); err != nil {
 		log.Printf("zen config save failed: %v", err)
 	}
 	rebuildZenTransport()

@@ -70,11 +70,7 @@ func loadPool() *AccountPool {
 	var p AccountPool
 	if err := json.Unmarshal(data, &p); err != nil {
 		// 坏文件改名隔离：否则空池会在下一次 savePool 时覆盖销毁原始数据
-		if renameErr := os.Rename(poolPath, poolPath+".bad"); renameErr == nil {
-			log.Printf("accounts file corrupt, quarantined as %s.bad: %v", poolPath, err)
-		} else {
-			log.Printf("accounts file parse failed (quarantine failed: %v): %v", renameErr, err)
-		}
+		quarantineFile(poolPath, err)
 		pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{}}
 		return pool
 	}
@@ -100,6 +96,26 @@ func savePool() {
 	savePoolLocked()
 }
 
+// writeFileAtomic 先写临时文件再 rename 替换，避免进程被杀/断电产生半截文件
+// （pool / credentials / proxy+zen config / request logs 共用，P2-14）。
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// quarantineFile 解析失败的数据文件改名隔离：否则默认值配置会在下一次保存时
+// 直接覆盖销毁原始数据（用户失去排查线索）。隔离失败仅记录。
+func quarantineFile(path string, cause error) {
+	if renameErr := os.Rename(path, path+".bad"); renameErr == nil {
+		log.Printf("%s corrupt, quarantined as %s.bad: %v", path, path, cause)
+	} else {
+		log.Printf("%s parse failed (quarantine failed: %v): %v", path, renameErr, cause)
+	}
+}
+
 // savePoolLocked 在已持有 poolMu 的前提下持久化池（tmp+rename 原子写）。
 // Marshal 必须在锁内进行：否则与并发修改 ModelStats/ModelCooldowns 等映射产生
 // "concurrent map iteration and map write" 致命错误（进程直接退出，无法 recover）。
@@ -109,12 +125,7 @@ func savePoolLocked() {
 		log.Printf("Failed to marshal accounts: %v", err)
 		return
 	}
-	tmp := poolPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		log.Printf("Failed to save accounts: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, poolPath); err != nil {
+	if err := writeFileAtomic(poolPath, data, 0600); err != nil {
 		log.Printf("Failed to save accounts: %v", err)
 	}
 }

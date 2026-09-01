@@ -869,13 +869,18 @@ func defaultProxyConfig() *proxyConfigData {
 
 const proxyConfigPath = ".cline-config.json"
 
+// proxyConfigFile 启动时解析的落盘路径（resolveDataPath 为纯函数，包级初始化安全；
+// 变量形式便于测试重定向到临时目录）。
+var proxyConfigFile = resolveDataPath(proxyConfigPath)
+
 // loadProxyConfigFromDisk 启动时加载持久化的代理配置（轮询策略/请求头），
 // 文件不存在或损坏时回退默认值。resolveDataPath 为纯函数，包级初始化安全。
 func loadProxyConfigFromDisk() *proxyConfigData {
 	cfg := defaultProxyConfig()
-	if data, err := os.ReadFile(resolveDataPath(proxyConfigPath)); err == nil {
+	if data, err := os.ReadFile(proxyConfigFile); err == nil {
 		if err := json.Unmarshal(data, cfg); err != nil {
-			log.Printf("proxy config parse failed: %v", err)
+			// 坏文件隔离：否则下次保存会用默认值覆盖销毁原始配置
+			quarantineFile(proxyConfigFile, err)
 		}
 	}
 	switch cfg.Strategy {
@@ -892,7 +897,7 @@ func saveProxyConfigLocked() {
 	if err != nil {
 		return
 	}
-	if err := os.WriteFile(resolveDataPath(proxyConfigPath), data, 0600); err != nil {
+	if err := writeFileAtomic(proxyConfigFile, data, 0600); err != nil {
 		log.Printf("proxy config save failed: %v", err)
 	}
 }

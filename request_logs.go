@@ -57,6 +57,8 @@ func loadRequestLogs() {
 	}
 	var entries []RequestLog
 	if err := json.Unmarshal(data, &entries); err != nil {
+		// 坏文件隔离，避免下次保存覆盖销毁原始日志
+		quarantineFile(requestLogsPath, err)
 		return
 	}
 	requestLogsMu.Lock()
@@ -94,11 +96,7 @@ func saveRequestLogsLocked() {
 	if err != nil {
 		return
 	}
-	tmp := requestLogsPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, requestLogsPath)
+	_ = writeFileAtomic(requestLogsPath, data, 0600)
 }
 
 func appendRequestLog(entry RequestLog) {
