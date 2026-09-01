@@ -433,7 +433,7 @@ func startProxy(host string, port int) error {
 		case "zen":
 			reqLog.Upstream = upstreamOpenCode
 			zm, _ := resolveZenInfo(model)
-			out := maybeCompact(params, zm, requestSessionID(params, r.Header))
+			out := maybeCompact(r.Context(), params, zm, requestSessionID(params, r.Header))
 			if out.changed {
 				log.Printf("  chat %s", out.note)
 			}
@@ -1690,7 +1690,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	case "zen":
 		reqLog.Upstream = upstreamOpenCode
 		zm, _ := resolveZenInfo(req.Model)
-		out := maybeCompact(openAIReq, zm, requestSessionID(map[string]any{"session_id": r.Header.Get("x-opencode-session")}, nil))
+		out := maybeCompact(r.Context(), openAIReq, zm, requestSessionID(map[string]any{"session_id": r.Header.Get("x-opencode-session")}, nil))
 		if out.changed {
 			log.Printf("  anthropic %s", out.note)
 		}

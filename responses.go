@@ -504,7 +504,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	case "zen":
 		reqLog.Upstream = upstreamOpenCode
 		zm, _ := resolveZenInfo(chatModel)
-		out := maybeCompact(chat, zm, requestSessionID(chat, r.Header))
+		out := maybeCompact(r.Context(), chat, zm, requestSessionID(chat, r.Header))
 		if out.changed {
 			log.Printf("  responses %s", out.note)
 		}

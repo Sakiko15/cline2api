@@ -228,13 +228,13 @@ func buildSummaryPrompt(previousSummary string, context []string) string {
 }
 
 // generateSummary 调用 zen 上游生成摘要文本。
-func generateSummary(modelID, prompt string, maxSummary int) (string, error) {
+func generateSummary(ctx context.Context, modelID, prompt string, maxSummary int) (string, error) {
 	body := map[string]any{
 		"model":      modelID,
 		"messages":   []any{map[string]any{"role": "user", "content": prompt}},
 		"max_tokens": maxSummary,
 	}
-	resp, err := callZenAPI(context.Background(), body, false)
+	resp, err := callZenAPI(ctx, body, false)
 	if err != nil {
 		return "", err
 	}
@@ -291,7 +291,7 @@ type compactOutcome struct {
 }
 
 // maybeCompact 估算超限时执行摘要压缩并原地改写 params["messages"]。
-func maybeCompact(params map[string]any, zm Model, sessionID string) compactOutcome {
+func maybeCompact(ctx context.Context, params map[string]any, zm Model, sessionID string) compactOutcome {
 	cfg := getZenConfig()
 	if !cfg.Compaction.Auto {
 		return compactOutcome{}
@@ -364,7 +364,7 @@ func maybeCompact(params map[string]any, zm Model, sessionID string) compactOutc
 	}
 	log.Printf("  compact: model=%s ctx=%d est=%d threshold=%d keep=%d split@%d/%d summary_model=%s",
 		zm.ID, context, estimateJSON(params), threshold, keep, sel.split, len(messages), summaryModel)
-	summary, err := generateSummary(summaryModel, prompt, maxSum)
+	summary, err := generateSummary(ctx, summaryModel, prompt, maxSum)
 	if err != nil {
 		log.Printf("  compact: summary generation failed (%v), falling back to truncation", err)
 		return fallbackTruncate(params, zm)
