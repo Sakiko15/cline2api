@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -219,6 +220,128 @@ func TestChatRejectsOnlyWhenPoolEmpty(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("cooldown-only pool POST = %d, want 200; body=%s", resp.StatusCode, body)
 	}
+}
+
+// ---- P3-4：登录按 IP 失败计数与锁定 ----
+
+func resetLoginAttempts() {
+	loginAttemptsMu.Lock()
+	loginAttempts = make(map[string]*loginAttemptState)
+	loginAttemptsMu.Unlock()
+}
+
+func postLogin(password string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("POST", "http://localhost:3457/admin/api/login",
+		strings.NewReader(`{"password":"`+password+`"}`))
+	r.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handleAdminLogin(rec, r)
+	return rec
+}
+
+func TestAdminLoginLockoutAfterFiveFailures(t *testing.T) {
+	oldPool := pool
+	oldDelay := loginFailureDelay
+	oldDuration := loginLockoutDuration
+	loginFailureDelay = time.Millisecond
+	loginLockoutDuration = 5 * time.Minute
+	t.Cleanup(func() {
+		pool = oldPool
+		loginFailureDelay = oldDelay
+		loginLockoutDuration = oldDuration
+		resetLoginAttempts()
+	})
+	pool = &AccountPool{
+		Accounts: []*Account{}, Keys: []string{}, Models: []Model{},
+		AdminPasswordSalt: "s", AdminPasswordHash: hashAdminPassword("s", "pw"),
+	}
+	resetLoginAttempts()
+
+	// 5 次错误密码 → 触发锁定
+	for i := 0; i < 5; i++ {
+		if rec := postLogin("wrong"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d = %d, want 401", i+1, rec.Code)
+		}
+	}
+	// 第 6 次：即使密码正确也 429 + Retry-After
+	rec := postLogin("pw")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked login = %d, want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("429 response must carry Retry-After")
+	}
+	if strings.Contains(rec.Body.String(), "login_ok") {
+		t.Fatalf("locked login must not succeed")
+	}
+}
+
+func TestAdminLoginSuccessResetsCounter(t *testing.T) {
+	oldPool := pool
+	oldDelay := loginFailureDelay
+	loginFailureDelay = time.Millisecond
+	t.Cleanup(func() {
+		pool = oldPool
+		loginFailureDelay = oldDelay
+		resetLoginAttempts()
+	})
+	pool = &AccountPool{
+		Accounts: []*Account{}, Keys: []string{}, Models: []Model{},
+		AdminPasswordSalt: "s", AdminPasswordHash: hashAdminPassword("s", "pw"),
+	}
+	resetLoginAttempts()
+
+	for i := 0; i < 3; i++ {
+		if rec := postLogin("wrong"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d = %d, want 401", i+1, rec.Code)
+		}
+	}
+	if rec := postLogin("pw"); rec.Code != http.StatusOK {
+		t.Fatalf("correct login after 3 failures = %d, want 200", rec.Code)
+	}
+	// 计数已清零：再 4 次失败不应触发锁定
+	for i := 0; i < 4; i++ {
+		if rec := postLogin("wrong"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("post-reset failure %d = %d, want 401", i+1, rec.Code)
+		}
+	}
+	if rec := postLogin("pw"); rec.Code != http.StatusOK {
+		t.Fatalf("login after 4 fresh failures = %d, want 200 (no premature lockout)", rec.Code)
+	}
+}
+
+func TestAdminLockoutExpires(t *testing.T) {
+	oldPool := pool
+	oldDelay := loginFailureDelay
+	oldDuration := loginLockoutDuration
+	loginFailureDelay = time.Millisecond
+	loginLockoutDuration = 20 * time.Millisecond
+	t.Cleanup(func() {
+		pool = oldPool
+		loginFailureDelay = oldDelay
+		loginLockoutDuration = oldDuration
+		resetLoginAttempts()
+	})
+	pool = &AccountPool{
+		Accounts: []*Account{}, Keys: []string{}, Models: []Model{},
+		AdminPasswordSalt: "s", AdminPasswordHash: hashAdminPassword("s", "pw"),
+	}
+	resetLoginAttempts()
+
+	for i := 0; i < 5; i++ {
+		postLogin("wrong")
+	}
+	if rec := postLogin("pw"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked login = %d, want 429", rec.Code)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if rec := postLogin("pw"); rec.Code == http.StatusOK {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("lockout did not expire within 2s")
 }
 
 func TestAppendRequestLogDeferredPersist(t *testing.T) {

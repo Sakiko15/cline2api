@@ -53,6 +53,10 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "密码错误",
 		localeEN: "Incorrect password",
 	},
+	"too_many_attempts": {
+		localeZH: "失败次数过多，请稍后再试",
+		localeEN: "Too many failed attempts, try again later",
+	},
 	"login_ok": {
 		localeZH: "登录成功",
 		localeEN: "Signed in",

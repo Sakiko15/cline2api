@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -82,6 +83,104 @@ func evictExpiredOAuthSessionsLocked() {
 			delete(oauthSessions, id)
 		}
 	}
+}
+
+// 登录防爆破（P3-4）：按源 IP 记连续失败次数，达到阈值锁定一段时间。
+// 锁定期内不执行密码校验（PBKDF2 后单次校验 ~100ms+，防 CPU 耗尽）。
+type loginAttemptState struct {
+	fails       int
+	lockedUntil time.Time
+}
+
+var (
+	loginAttempts   = make(map[string]*loginAttemptState)
+	loginAttemptsMu sync.Mutex
+)
+
+const (
+	loginMaxConsecutiveFails = 5
+	loginLockoutSweepMax     = 512 // map 惰性清理的单次上限，防异常增长
+)
+
+var (
+	loginLockoutDuration = 5 * time.Minute     // var 便于测试收缩
+	loginFailureDelay    = 500 * time.Millisecond
+)
+
+// clientIP 提取请求源 IP（不用可伪造的 X-Forwarded-For）。
+func clientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// loginIsLocked 报告该 IP 是否处于锁定期；到期顺手清零并惰性清理过期项。
+func loginIsLocked(ip string) bool {
+	now := time.Now()
+	loginAttemptsMu.Lock()
+	defer loginAttemptsMu.Unlock()
+	if len(loginAttempts) > 0 && len(loginAttempts) <= loginLockoutSweepMax {
+		for k, st := range loginAttempts {
+			if st.lockedUntil.IsZero() && st.fails == 0 {
+				delete(loginAttempts, k)
+			} else if !st.lockedUntil.IsZero() && now.After(st.lockedUntil) {
+				delete(loginAttempts, k)
+			}
+		}
+	}
+	st, ok := loginAttempts[ip]
+	if !ok {
+		return false
+	}
+	if !st.lockedUntil.IsZero() {
+		if now.Before(st.lockedUntil) {
+			return true
+		}
+		st.lockedUntil = time.Time{}
+		st.fails = 0
+	}
+	return false
+}
+
+// loginLockRemainingSeconds 返回该 IP 剩余锁定秒数（未锁定为 0）。
+func loginLockRemainingSeconds(ip string) int {
+	loginAttemptsMu.Lock()
+	defer loginAttemptsMu.Unlock()
+	st, ok := loginAttempts[ip]
+	if !ok || st.lockedUntil.IsZero() {
+		return 0
+	}
+	remain := time.Until(st.lockedUntil)
+	if remain <= 0 {
+		return 0
+	}
+	return int(remain.Seconds()) + 1
+}
+
+func recordLoginFailure(ip string) {
+	now := time.Now()
+	loginAttemptsMu.Lock()
+	defer loginAttemptsMu.Unlock()
+	st, ok := loginAttempts[ip]
+	if !ok {
+		st = &loginAttemptState{}
+		loginAttempts[ip] = st
+	}
+	if !st.lockedUntil.IsZero() && now.After(st.lockedUntil) {
+		st.fails = 0
+		st.lockedUntil = time.Time{}
+	}
+	st.fails++
+	if st.fails >= loginMaxConsecutiveFails {
+		st.lockedUntil = now.Add(loginLockoutDuration)
+	}
+}
+
+func clearLoginFailures(ip string) {
+	loginAttemptsMu.Lock()
+	delete(loginAttempts, ip)
+	loginAttemptsMu.Unlock()
 }
 
 func registerAdminRoutes(mux *http.ServeMux) {
@@ -307,11 +406,20 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 			writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "password_not_enabled")})
 			return
 		}
+		// 锁定检查先于密码校验：锁定期不跑 KDF（P3-4）
+		ip := clientIP(r)
+		if loginIsLocked(ip) {
+			w.Header().Set("Retry-After", strconv.Itoa(loginLockRemainingSeconds(ip)))
+			writeAPI(w, http.StatusTooManyRequests, apiResponse{Error: tAPI(r, "too_many_attempts")})
+			return
+		}
 		if !verifyAdminPassword(req.Password) {
-			time.Sleep(500 * time.Millisecond) // 防爆破
+			recordLoginFailure(ip)
+			time.Sleep(loginFailureDelay) // 防爆破（未触发锁定时的额外摩擦）
 			writeAPI(w, http.StatusUnauthorized, apiResponse{Error: tAPI(r, "wrong_password")})
 			return
 		}
+		clearLoginFailures(ip)
 	token := randomHex(32)
 	adminSessionsMu.Lock()
 	adminSessions[token] = time.Now().Add(adminSessionTTL)
