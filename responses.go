@@ -512,9 +512,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("  responses api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeJSON(w, http.StatusBadGateway, map[string]any{
-				"error": map[string]string{"message": err.Error(), "type": "api_error"},
-			})
+			writeUpstreamError(w, err)
 			return
 		}
 		defer upResp.Body.Close()
@@ -548,9 +546,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("  responses api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeJSON(w, clineErrorHTTPStatus(err), map[string]any{
-				"error": map[string]string{"message": err.Error(), "type": "api_error"},
-			})
+			writeUpstreamError(w, err)
 			return
 		}
 		defer upResp.Body.Close()

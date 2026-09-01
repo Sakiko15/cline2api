@@ -449,9 +449,7 @@ func startProxy(host string, port int) error {
 			if err != nil {
 				log.Printf("  api error: %v", err)
 				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-				writeJSON(w, http.StatusBadGateway, map[string]any{
-					"error": map[string]string{"message": err.Error(), "type": "api_error"},
-				})
+				writeUpstreamError(w, err)
 				return
 			}
 			defer resp.Body.Close()
@@ -480,9 +478,7 @@ func startProxy(host string, port int) error {
 		if err != nil {
 			log.Printf("  api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeJSON(w, clineErrorHTTPStatus(err), map[string]any{
-				"error": map[string]string{"message": err.Error(), "type": "api_error"},
-			})
+			writeUpstreamError(w, err)
 			return
 		}
 		reqLog.Upstream = upstreamCline
@@ -703,11 +699,55 @@ func (e *freeModelUnavailableError) Error() string {
 	return e.message
 }
 
-func clineErrorHTTPStatus(err error) int {
+// upstreamErrorHTTPStatus 将上游错误映射为客户端状态码（P2-9：此前除 free 链
+// 耗尽 429 外全部坍缩为 500，客户端 SDK 把注定失败的请求当可重试 5xx 反复重试）：
+//   - zen 上游状态 ≥400 原样透传，否则 502
+//   - free 链耗尽（freeModelUnavailableError）仍 429
+//   - cline 上游状态 ≥400 原样透传
+//   - transport/取消/本地错误 → 500
+func upstreamErrorHTTPStatus(err error) int {
+	var zerr *zenAPIError
+	if errors.As(err, &zerr) {
+		if zerr.statusCode >= 400 && zerr.statusCode < 600 {
+			return zerr.statusCode
+		}
+		return http.StatusBadGateway
+	}
 	if _, ok := err.(*freeModelUnavailableError); ok {
 		return http.StatusTooManyRequests
 	}
+	var apiErr *clineAPIError
+	if errors.As(err, &apiErr) && apiErr.statusCode >= 400 {
+		return apiErr.statusCode
+	}
 	return http.StatusInternalServerError
+}
+
+// retryAfterFor 解析 429 的客户端重试提示：zen 用上游 Retry-After 头；
+// cline 仅当错误文本含冷却时长（"Try again in Xh Ym"）时回填，钳制 1 小时。
+func retryAfterFor(err error) time.Duration {
+	var zerr *zenAPIError
+	if errors.As(err, &zerr) {
+		return clampRetryWait(zerr.retryAfter, time.Hour)
+	}
+	msg := err.Error()
+	if !cooldownHoursRe.MatchString(msg) && !cooldownMinutesRe.MatchString(msg) {
+		return 0
+	}
+	return clampRetryWait(time.Until(parseCooldownUntil(msg)), time.Hour)
+}
+
+// writeUpstreamError 统一 /v1 错误响应：按上游状态映射状态码，429 回填 Retry-After。
+func writeUpstreamError(w http.ResponseWriter, err error) {
+	status := upstreamErrorHTTPStatus(err)
+	if status == http.StatusTooManyRequests {
+		if d := retryAfterFor(err); d > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(d.Seconds())+1))
+		}
+	}
+	writeJSON(w, status, map[string]any{
+		"error": map[string]string{"message": err.Error(), "type": "api_error"},
+	})
 }
 
 func callClineAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, *Account, error) {
@@ -1725,9 +1765,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("  anthropic api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-			writeJSON(w, http.StatusBadGateway, map[string]any{
-				"error": map[string]string{"message": err.Error(), "type": "api_error"},
-			})
+			writeUpstreamError(w, err)
 			return
 		}
 		defer resp.Body.Close()
@@ -1780,9 +1818,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("  anthropic api error: %v", err)
 		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
-		writeJSON(w, clineErrorHTTPStatus(err), map[string]any{
-			"error": map[string]string{"message": err.Error(), "type": "api_error"},
-		})
+		writeUpstreamError(w, err)
 		return
 	}
 	reqLog.Upstream = upstreamCline

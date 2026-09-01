@@ -532,6 +532,19 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 	return body
 }
 
+// zenAPIError 携带上游 HTTP 状态与 Retry-After，供客户端响应映射（P2-9：
+// 此前 zen 错误无类型，所有上游状态坍缩为 502）。transport/取消仍是普通 error。
+type zenAPIError struct {
+	statusCode int
+	message    string
+	retryAfter time.Duration
+}
+
+func (e *zenAPIError) Error() string {
+	// 保持既有日志/回显格式不变
+	return fmt.Sprintf("zen API %d: %s", e.statusCode, e.message)
+}
+
 // callZenAPI 调用 zen 上游：并发信号量 + 指数退避重试 + 代理冷却 + 故障转移计数。
 // 身份头每次轮换。返回的响应由调用方关闭。
 func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, error) {
@@ -606,12 +619,16 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 
 		bodyBytes := readAllLimited(resp.Body, 64<<10)
 		resp.Body.Close()
-		reason := fmt.Sprintf("zen API %d: %s", resp.StatusCode, truncate(string(bodyBytes), 500))
+		zerr := &zenAPIError{
+			statusCode: resp.StatusCode,
+			message:    truncate(string(bodyBytes), 500),
+			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 
 		if isRateLimited(resp.StatusCode, string(bodyBytes)) {
 			// 冷却当前出口代理（Retry-After 优先，默认 10 分钟；钳制上限 1h）
 			if idx := lastZenProxyIdx(); idx >= 0 {
-				d := clampRetryWait(parseRetryAfter(resp.Header.Get("Retry-After")), maxProxyCooldown)
+				d := clampRetryWait(zerr.retryAfter, maxProxyCooldown)
 				if d <= 0 {
 					d = 10 * time.Minute
 				}
@@ -619,7 +636,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 			}
 			if attempt < retries {
 				wait := delay
-				if ra := clampRetryWait(parseRetryAfter(resp.Header.Get("Retry-After")), maxRetryWait); ra > wait {
+				if ra := clampRetryWait(zerr.retryAfter, maxRetryWait); ra > wait {
 					wait = ra
 				}
 				log.Printf("  zen rate limited (%d), retry %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
@@ -630,11 +647,11 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 				continue
 			}
 			markZenFail()
-			return nil, fmt.Errorf("%s", reason)
+			return nil, zerr
 		}
 
 		markZenFail()
-		return nil, fmt.Errorf("%s", reason)
+		return nil, zerr
 	}
 }
 

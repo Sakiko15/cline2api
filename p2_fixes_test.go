@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---- P2-14 原子写与坏文件隔离 ----
@@ -195,5 +199,108 @@ func TestRefreshRejectedMarksExpired(t *testing.T) {
 	}
 	if acc.Status != "expired" {
 		t.Fatalf("4xx rejection should expire account, got %q", acc.Status)
+	}
+}
+
+// ---- P2-9 上游状态码透传与 Retry-After ----
+
+func TestUpstreamErrorHTTPStatus(t *testing.T) {
+	cases := []struct {
+		err  error
+		want int
+	}{
+		{&clineAPIError{statusCode: 403, message: "forbidden"}, 403},
+		{&clineAPIError{statusCode: 429, message: "rate"}, 429},
+		{&clineAPIError{statusCode: 502, message: "bad gw"}, 502},
+		{&freeModelUnavailableError{message: "no eligible accounts"}, 429},
+		{&zenAPIError{statusCode: 429, message: "rate"}, 429},
+		{&zenAPIError{statusCode: 403, message: "forbidden"}, 403},
+		{&zenAPIError{statusCode: 503, message: "unavailable"}, 503},
+		{&zenAPIError{statusCode: 0, message: "unknown"}, 502},
+		{fmt.Errorf("no active accounts available"), 500},
+		{&clineAccountUnavailableError{err: fmt.Errorf("transport down")}, 500},
+	}
+	for _, c := range cases {
+		if got := upstreamErrorHTTPStatus(c.err); got != c.want {
+			t.Errorf("upstreamErrorHTTPStatus(%T) = %d, want %d", c.err, got, c.want)
+		}
+	}
+}
+
+func TestWriteUpstreamErrorRetryAfter(t *testing.T) {
+	// zen 429 带 Retry-After → 回填秒数
+	rec := httptest.NewRecorder()
+	writeUpstreamError(rec, &zenAPIError{statusCode: 429, message: "slow down", retryAfter: 45 * time.Second})
+	if rec.Code != 429 {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	if ra := rec.Header().Get("Retry-After"); ra == "" {
+		t.Fatal("zen 429 with Retry-After should set the header")
+	}
+
+	// zen 429 无 Retry-After → 不设头
+	rec = httptest.NewRecorder()
+	writeUpstreamError(rec, &zenAPIError{statusCode: 429, message: "slow down"})
+	if rec.Code != 429 || rec.Header().Get("Retry-After") != "" {
+		t.Fatalf("zen 429 without Retry-After: status=%d header=%q", rec.Code, rec.Header().Get("Retry-After"))
+	}
+
+	// cline 429 错误文本含 "Try again in 45m" → 回填（P1-8 修复后的分钟级解析）
+	rec = httptest.NewRecorder()
+	writeUpstreamError(rec, &clineAPIError{statusCode: 429, message: "Try again in 45m"})
+	if rec.Code != 429 {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	ra, err := strconv.Atoi(rec.Header().Get("Retry-After"))
+	if err != nil || ra < 40*60 || ra > 46*60 {
+		t.Fatalf("Retry-After = %q, want ≈45m in seconds", rec.Header().Get("Retry-After"))
+	}
+
+	// 非 429 → 不设头
+	rec = httptest.NewRecorder()
+	writeUpstreamError(rec, &clineAPIError{statusCode: 403, message: "Try again in 45m"})
+	if rec.Code != 403 || rec.Header().Get("Retry-After") != "" {
+		t.Fatalf("403 should not carry Retry-After: status=%d header=%q", rec.Code, rec.Header().Get("Retry-After"))
+	}
+}
+
+// 端到端：上游 403 必须原样到达客户端（修复前坍缩为 500）。
+func TestChatPropagatesUpstreamStatus(t *testing.T) {
+	oldPool := pool
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		httpClient.Transport = oldTransport
+	})
+
+	baseURL := protocolTestServer(t)
+
+	acc := &Account{
+		AccountID:   "prop1",
+		Email:       "prop@example.com",
+		AccessToken: "tok",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{acc}, Keys: []string{}, Models: []Model{}}
+
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"account suspended"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	resp, err := http.Post(baseURL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"some-nonexistent-model","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 403 (body=%s)", resp.StatusCode, body)
 	}
 }
