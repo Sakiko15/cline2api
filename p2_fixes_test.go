@@ -814,3 +814,74 @@ func TestEnsurePortFreeRefusesOccupied(t *testing.T) {
 		t.Fatalf("free port should pass, got %v", err)
 	}
 }
+
+// ---- P2-18 模型去重与默认模型清理 ----
+
+func TestGetAllModelsDedupePrecedence(t *testing.T) {
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+
+	custom := Model{ID: "dup-model", Provider: "custom", Cost: "paid", Source: ""}
+	remote := Model{ID: "dup-model", Provider: "remote", Cost: "free", Source: "remote"}
+	zen := Model{ID: "dup-model", Provider: "opencode", Cost: "free", Source: "zen"}
+	unique := Model{ID: "only-zen", Provider: "opencode", Cost: "free", Source: "zen"}
+	pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{zen, remote, custom, unique}}
+
+	all := getAllModels()
+	got := map[string]Model{}
+	for _, m := range all {
+		if _, dup := got[m.ID]; dup {
+			t.Fatalf("duplicate ID %q in getAllModels result", m.ID)
+		}
+		got[m.ID] = m
+	}
+	if m := got["dup-model"]; m.Source != "" {
+		t.Fatalf("custom entry should win precedence, got source %q", m.Source)
+	}
+	if _, ok := got["only-zen"]; !ok {
+		t.Fatal("unique zen model should be listed")
+	}
+
+	// 内置分支：custom 覆盖内置表同 ID 条目
+	pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{custom}}
+	all = getAllModels()
+	count := 0
+	for _, m := range all {
+		if m.ID == "dup-model" {
+			count++
+			if m.Source != "" {
+				t.Fatalf("custom should override builtin same-ID entry, got source %q", m.Source)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("dup-model should appear exactly once, got %d", count)
+	}
+}
+
+func TestDefaultModelResetWhenGone(t *testing.T) {
+	oldPool := pool
+	t.Cleanup(func() { pool = oldPool })
+
+	// 默认模型已不在列表 → 清空
+	pool = &AccountPool{
+		Accounts: []*Account{}, Keys: []string{},
+		Models:      []Model{{ID: "kept-model", Source: "remote"}},
+		DefaultModel: "gone-model",
+	}
+	validateDefaultModelAfterSync()
+	if p := loadPool(); p.DefaultModel != "" {
+		t.Fatalf("stale default model should be cleared, got %q", p.DefaultModel)
+	}
+
+	// 默认模型仍在列表 → 保留
+	pool = &AccountPool{
+		Accounts: []*Account{}, Keys: []string{},
+		Models:      []Model{{ID: "kept-model", Source: "remote"}},
+		DefaultModel: "kept-model",
+	}
+	validateDefaultModelAfterSync()
+	if p := loadPool(); p.DefaultModel != "kept-model" {
+		t.Fatalf("existing default model should be kept, got %q", p.DefaultModel)
+	}
+}

@@ -187,6 +187,7 @@ func syncClineModels() modelSyncResult {
 	res.Changed = len(res.Added) > 0 || len(res.Removed) > 0
 	poolMu.Unlock()
 	savePool()
+	validateDefaultModelAfterSync()
 
 	remoteModelsEnabledMu.Lock()
 	remoteModelsEnabled = true
@@ -205,6 +206,28 @@ func syncClineModels() modelSyncResult {
 // triggerModelSync 供管理后台手动触发同步；非阻塞等待完成并返回结果。
 func triggerModelSync() modelSyncResult {
 	return syncClineModels()
+}
+
+// validateDefaultModelAfterSync 同步替换模型列表后校验默认模型仍存在，缺失则清空
+// 并落盘（P2-18）；清空后 getDefaultModel 走既有回退逻辑。
+func validateDefaultModelAfterSync() {
+	p := loadPool()
+	poolMu.Lock()
+	if p.DefaultModel == "" {
+		poolMu.Unlock()
+		return
+	}
+	for _, m := range p.Models {
+		if m.ID == p.DefaultModel {
+			poolMu.Unlock()
+			return
+		}
+	}
+	cleared := p.DefaultModel
+	p.DefaultModel = ""
+	poolMu.Unlock()
+	savePool()
+	log.Printf("default model %q no longer available after models sync; cleared", cleared)
 }
 
 // getModelSyncResult 返回最近一次同步结果（供管理后台展示）。

@@ -70,20 +70,34 @@ func getAllModels() []Model {
 	}
 
 	if len(remote) > 0 || len(zen) > 0 || remoteZenActive() {
-		result := make([]Model, 0, len(remote)+len(zen)+len(custom))
-		result = append(result, remote...)
-		result = append(result, zen...)
-		result = append(result, custom...)
-		return result
+		// 同 ID 首见优先：用户自定义 → 远程 → zen（P2-18，自定义条目覆盖同步来源）
+		return dedupeModelsByID(custom, remote, zen)
 	}
 
 	builtin := make([]Model, 0, len(builtinModels)+len(zenSeedModels))
 	builtin = append(builtin, builtinModels...)
 	builtin = append(builtin, builtinZenModels()...)
 
-	result := make([]Model, 0, len(builtin)+len(custom))
-	result = append(result, builtin...)
-	result = append(result, custom...)
+	return dedupeModelsByID(custom, builtin)
+}
+
+// dedupeModelsByID 按模型 ID 去重拼接多个模型组，首见优先（P2-18）。
+func dedupeModelsByID(groups ...[]Model) []Model {
+	total := 0
+	for _, g := range groups {
+		total += len(g)
+	}
+	result := make([]Model, 0, total)
+	seen := make(map[string]bool, total)
+	for _, g := range groups {
+		for _, m := range g {
+			if m.ID == "" || seen[m.ID] {
+				continue
+			}
+			seen[m.ID] = true
+			result = append(result, m)
+		}
+	}
 	return result
 }
 

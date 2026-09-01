@@ -803,6 +803,7 @@ func syncZenModels() modelSyncResult {
 	res.Changed = len(res.Added) > 0 || len(res.Removed) > 0
 	poolMu.Unlock()
 	savePool()
+	validateDefaultModelAfterSync()
 
 	remoteZenEnabledMu.Lock()
 	remoteZenEnabled = true
