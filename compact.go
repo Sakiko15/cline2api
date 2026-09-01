@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -233,7 +234,7 @@ func generateSummary(modelID, prompt string, maxSummary int) (string, error) {
 		"messages":   []any{map[string]any{"role": "user", "content": prompt}},
 		"max_tokens": maxSummary,
 	}
-	resp, err := callZenAPI(body, false)
+	resp, err := callZenAPI(context.Background(), body, false)
 	if err != nil {
 		return "", err
 	}

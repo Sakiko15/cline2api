@@ -137,7 +137,7 @@ func restartListener(host string, port int) error {
 
 	serverMu.Lock()
 	old := currentServer
-	server := &http.Server{Addr: addr, Handler: serverMux}
+	server := &http.Server{Addr: addr, Handler: serverMux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	currentServer = server
 	serverMu.Unlock()
 
@@ -415,7 +415,7 @@ func startProxy(host string, port int) error {
 			if out.changed {
 				log.Printf("  chat %s", out.note)
 			}
-			resp, err := callZenAPI(params, isStream)
+			resp, err := callZenAPI(r.Context(), params, isStream)
 			if err != nil {
 				log.Printf("  api error: %v", err)
 				finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
@@ -443,7 +443,7 @@ func startProxy(host string, port int) error {
 			return
 		}
 
-		resp, acc, err := callClineAPI(params, isStream)
+		resp, acc, err := callClineAPI(r.Context(), params, isStream)
 		if effectiveModel, ok := params["model"].(string); ok && effectiveModel != "" {
 			reqLog.Model = effectiveModel
 		}
@@ -501,8 +501,10 @@ func startProxy(host string, port int) error {
 	listenPort = port
 	serverMux = mux
 	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,  // slowloris 防护（P1-3）
+		IdleTimeout:       120 * time.Second, // WriteTimeout 留 0，SSE 长流不受影响
 	}
 	serverMu.Lock()
 	currentServer = server
@@ -669,20 +671,20 @@ func clineErrorHTTPStatus(err error) int {
 	return http.StatusInternalServerError
 }
 
-func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
+func callClineAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, *Account, error) {
 	model, _ := params["model"].(string)
 	if model == "free" {
-		return callFreeClineAPI(params, stream)
+		return callFreeClineAPI(ctx, params, stream)
 	}
 
 	acc := pickAccountForModel(model)
 	if acc == nil {
 		return nil, nil, fmt.Errorf("no active accounts available. Use --login or admin API to add accounts")
 	}
-	return callClineAPIWithAccount(acc, params, stream)
+	return callClineAPIWithAccount(ctx, acc, params, stream)
 }
 
-func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
+func callFreeClineAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, *Account, error) {
 	for _, model := range freeModelChain {
 		params["model"] = model
 		for {
@@ -691,7 +693,7 @@ func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Acco
 				break
 			}
 
-			resp, usedAcc, err := callClineAPIWithAccount(acc, params, stream)
+			resp, usedAcc, err := callClineAPIWithAccount(ctx, acc, params, stream)
 			if err == nil {
 				return resp, usedAcc, nil
 			}
@@ -708,7 +710,7 @@ func callFreeClineAPI(params map[string]any, stream bool) (*http.Response, *Acco
 	return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
 }
 
-func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (*http.Response, *Account, error) {
+func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[string]any, stream bool) (*http.Response, *Account, error) {
 	token, err := ensureAccountToken(acc)
 	if err != nil {
 		// Try other accounts
@@ -723,7 +725,8 @@ func callClineAPIWithAccount(acc *Account, params map[string]any, stream bool) (
 		return nil, acc, fmt.Errorf("marshal body: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", clineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
+	// 绑定请求上下文：客户端断开时上游请求随之取消（P1-4）
+	req, err := http.NewRequestWithContext(ctx, "POST", clineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
 	if err != nil {
 		return nil, acc, fmt.Errorf("create request: %w", err)
 	}
@@ -869,7 +872,7 @@ func testAccount(acc *Account) accountTestResult {
 		},
 	}
 
-	resp, _, err := callClineAPIWithAccount(acc, params, false)
+	resp, _, err := callClineAPIWithAccount(context.Background(), acc, params, false)
 	if err != nil {
 		result.DurationMs = time.Since(started).Milliseconds()
 		result.Error = truncate(err.Error(), 200)
@@ -1129,6 +1132,16 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 		return
 	}
 
+	// 写失败即中止：客户端断开/停滞时停止消费上游（P1-4）
+	writeChunk := func(b []byte) bool {
+		if _, err := w.Write(b); err != nil {
+			log.Printf("  stream write failed (client gone?): %v", err)
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
 	reader := bufio.NewReader(upstream.Body)
 	var latestUsage tokenUsage
 	var firstOutputAt time.Time
@@ -1137,7 +1150,7 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 		if err != nil {
 			if err == io.EOF {
 				if line != "" {
-					w.Write([]byte(line + "\n"))
+					writeChunk([]byte(line + "\n"))
 				}
 			}
 			break
@@ -1148,8 +1161,9 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 		if strings.HasPrefix(line, "data:") {
 			payload := strings.TrimSpace(line[5:])
 			if payload == "" || payload == "[DONE]" {
-				w.Write([]byte(line + "\n\n"))
-				flusher.Flush()
+				if !writeChunk([]byte(line + "\n\n")) {
+					break
+				}
 				continue
 			}
 
@@ -1175,15 +1189,17 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 					firstOutputAt = time.Now()
 				}
 				if normBytes, err := json.Marshal(normalized); err == nil {
-					w.Write([]byte("data: " + string(normBytes) + "\n\n"))
-					flusher.Flush()
+					if !writeChunk([]byte("data: " + string(normBytes) + "\n\n")) {
+						break
+					}
 					continue
 				}
 			}
 		}
 
-		w.Write([]byte(line + "\n"))
-		flusher.Flush()
+		if !writeChunk([]byte(line + "\n")) {
+			break
+		}
 	}
 	recordTokenUsage(acc, reqLog.Model, latestUsage)
 	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
@@ -1587,7 +1603,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		if out.changed {
 			log.Printf("  anthropic %s", out.note)
 		}
-		resp, err := callZenAPI(openAIReq, req.Stream)
+		resp, err := callZenAPI(r.Context(), openAIReq, req.Stream)
 		if err != nil {
 			log.Printf("  anthropic api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
@@ -1639,7 +1655,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, acc, err := callClineAPI(openAIReq, req.Stream)
+	resp, acc, err := callClineAPI(r.Context(), openAIReq, req.Stream)
 	if effectiveModel, ok := openAIReq["model"].(string); ok && effectiveModel != "" {
 		reqLog.Model = effectiveModel
 	}
@@ -1702,10 +1718,20 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		return
 	}
 
+	var writeErr error
 	emit := func(event string, data any) {
+		if writeErr != nil {
+			return
+		}
 		d, _ := json.Marshal(data)
-		w.Write([]byte(fmt.Sprintf("event: %s\n", event)))
-		w.Write([]byte(fmt.Sprintf("data: %s\n\n", string(d))))
+		if _, err := w.Write([]byte(fmt.Sprintf("event: %s\n", event))); err != nil {
+			writeErr = err
+			return
+		}
+		if _, err := w.Write([]byte(fmt.Sprintf("data: %s\n\n", string(d)))); err != nil {
+			writeErr = err
+			return
+		}
 		flusher.Flush()
 	}
 
@@ -1794,8 +1820,24 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	var firstOutputAt time.Time
 
 	for {
+		if writeErr != nil {
+			break // 客户端已断开/停滞，停止读取上游（P1-4）
+		}
 		line, err := reader.ReadString('\n')
 		if err != nil {
+			if err == io.EOF && line != "" && writeErr == nil {
+				// 最后一个无换行的 SSE 行也要处理（与 OpenAI 透传路径一致）
+				if strings.HasPrefix(line, "data:") {
+					if payload := strings.TrimSpace(line[5:]); payload != "" && payload != "[DONE]" {
+						var obj map[string]any
+						if json.Unmarshal([]byte(payload), &obj) == nil {
+							if usage := parseTokenUsage(obj["usage"]); usage.Valid {
+								latestUsage = mergeTokenUsage(latestUsage, usage)
+							}
+						}
+					}
+				}
+			}
 			break
 		}
 		line = strings.TrimRight(line, "\r\n")

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -531,7 +532,7 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 
 // callZenAPI 调用 zen 上游：并发信号量 + 指数退避重试 + 代理冷却 + 故障转移计数。
 // 身份头每次轮换。返回的响应由调用方关闭。
-func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
+func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, error) {
 	cfg := getZenConfig()
 	bodyJSON, err := json.Marshal(buildZenBody(params, stream))
 	if err != nil {
@@ -556,7 +557,11 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, error) {
 	delay := time.Second
 
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(bodyJSON))
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("zen request canceled: %w", err)
+		}
+		// 绑定请求上下文：客户端断开时上游请求随之取消（P1-4）
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(bodyJSON))
 		if err != nil {
 			return nil, fmt.Errorf("create zen request: %w", err)
 		}

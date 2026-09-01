@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,9 +21,11 @@ func (f freeModelRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 func TestCallClineAPIRefreshRetryReplaysRequestBody(t *testing.T) {
 	oldConfig := getProxyConfig()
 	oldTransport := httpClient.Transport
+	oldAuthTransport := authClient.Transport
 	t.Cleanup(func() {
 		setProxyConfig(oldConfig)
 		httpClient.Transport = oldTransport
+		authClient.Transport = oldAuthTransport
 	})
 
 	account := &Account{
@@ -37,7 +40,7 @@ func TestCallClineAPIRefreshRetryReplaysRequestBody(t *testing.T) {
 
 	var requestBodies []map[string]any
 	refreshCalls := 0
-	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+	rt := freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
 		case "/api/v1/auth/refresh":
 			refreshCalls++
@@ -75,12 +78,14 @@ func TestCallClineAPIRefreshRetryReplaysRequestBody(t *testing.T) {
 			return nil, fmt.Errorf("unexpected request path %s", req.URL.Path)
 		}
 	})
+	httpClient.Transport = rt
+	authClient.Transport = rt
 
 	params := map[string]any{
 		"model":    freeModelPrimary,
 		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
 	}
-	resp, _, err := callClineAPIWithAccount(account, params, false)
+	resp, _, err := callClineAPIWithAccount(context.Background(), account, params, false)
 	if err != nil {
 		t.Fatalf("callClineAPIWithAccount returned error: %v", err)
 	}
@@ -106,10 +111,12 @@ func TestCallClineAPIFreeRetriesNextGLMAccountAfterTokenRefreshFailure(t *testin
 	oldPool := pool
 	oldConfig := getProxyConfig()
 	oldTransport := httpClient.Transport
+	oldAuthTransport := authClient.Transport
 	t.Cleanup(func() {
 		pool = oldPool
 		setProxyConfig(oldConfig)
 		httpClient.Transport = oldTransport
+		authClient.Transport = oldAuthTransport
 	})
 
 	first := &Account{
@@ -132,7 +139,7 @@ func TestCallClineAPIFreeRetriesNextGLMAccountAfterTokenRefreshFailure(t *testin
 	var paths []string
 	var attempts []string
 	var models []string
-	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+	rt2 := freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
 		paths = append(paths, req.URL.Path)
 		switch req.URL.Path {
 		case "/api/v1/auth/refresh":
@@ -165,12 +172,14 @@ func TestCallClineAPIFreeRetriesNextGLMAccountAfterTokenRefreshFailure(t *testin
 			return nil, fmt.Errorf("unexpected request path %s", req.URL.Path)
 		}
 	})
+	httpClient.Transport = rt2
+	authClient.Transport = rt2
 
 	params := map[string]any{
 		"model":    "free",
 		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
 	}
-	resp, acc, err := callClineAPI(params, false)
+	resp, acc, err := callClineAPI(context.Background(), params, false)
 	if err != nil {
 		t.Fatalf("callClineAPI returned error: %v", err)
 	}
@@ -249,7 +258,7 @@ func TestCallClineAPIFreeRetriesNextGLMAccountAfterTransportFailure(t *testing.T
 		"model":    "free",
 		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
 	}
-	resp, acc, err := callClineAPI(params, false)
+	resp, acc, err := callClineAPI(context.Background(), params, false)
 	if err != nil {
 		t.Fatalf("callClineAPI returned error: %v", err)
 	}
@@ -330,7 +339,7 @@ func TestCallClineAPIFreeRetriesNextGLMAccountAfterQuota429(t *testing.T) {
 		"model":    "free",
 		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
 	}
-	resp, acc, err := callClineAPI(params, false)
+	resp, acc, err := callClineAPI(context.Background(), params, false)
 	if err != nil {
 		t.Fatalf("callClineAPI returned error: %v", err)
 	}
@@ -417,7 +426,7 @@ func TestCallClineAPIFreeFallsBackToDSAfterAllGLMAccountsUnavailable(t *testing.
 		"model":    "free",
 		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
 	}
-	resp, acc, err := callClineAPI(params, false)
+	resp, acc, err := callClineAPI(context.Background(), params, false)
 	if err != nil {
 		t.Fatalf("callClineAPI returned error: %v", err)
 	}
@@ -508,7 +517,7 @@ func TestCallClineAPIFreeRetriesNextDSAccountAfterQuota429(t *testing.T) {
 		"model":    "free",
 		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
 	}
-	resp, acc, err := callClineAPI(params, false)
+	resp, acc, err := callClineAPI(context.Background(), params, false)
 	if err != nil {
 		t.Fatalf("callClineAPI returned error: %v", err)
 	}
@@ -580,7 +589,7 @@ func TestCallClineAPIFreeReturnsToGLMAfterCooldownExpires(t *testing.T) {
 		}, nil
 	})
 
-	firstResp, _, err := callClineAPI(map[string]any{"model": "free"}, false)
+	firstResp, _, err := callClineAPI(context.Background(), map[string]any{"model": "free"}, false)
 	if err != nil {
 		t.Fatalf("first callClineAPI returned error: %v", err)
 	}
@@ -590,7 +599,7 @@ func TestCallClineAPIFreeReturnsToGLMAfterCooldownExpires(t *testing.T) {
 	}
 
 	account.ModelCooldowns[freeModelPrimary] = time.Now().Add(-time.Minute)
-	secondResp, _, err := callClineAPI(map[string]any{"model": "free"}, false)
+	secondResp, _, err := callClineAPI(context.Background(), map[string]any{"model": "free"}, false)
 	if err != nil {
 		t.Fatalf("second callClineAPI returned error: %v", err)
 	}
@@ -651,7 +660,7 @@ func TestCallClineAPIFreeKeepsModelCooldownsIndependent(t *testing.T) {
 				}, nil
 			})
 
-			resp, _, err := callClineAPI(map[string]any{"model": "free"}, false)
+			resp, _, err := callClineAPI(context.Background(), map[string]any{"model": "free"}, false)
 			if err != nil {
 				t.Fatalf("callClineAPI returned error: %v", err)
 			}
@@ -704,7 +713,7 @@ func TestCallClineAPIFreeDoesNotPickCoolingAccount(t *testing.T) {
 		}, nil
 	})
 
-	_, _, err := callClineAPI(map[string]any{"model": "free"}, false)
+	_, _, err := callClineAPI(context.Background(), map[string]any{"model": "free"}, false)
 	if err == nil {
 		t.Fatal("callClineAPI should fail when every GLM account is cooling")
 	}
@@ -793,7 +802,7 @@ func TestCallClineAPIDirectModelsKeepExactIDWithoutFallback(t *testing.T) {
 			})
 
 			params := map[string]any{"model": model}
-			_, _, err := callClineAPI(params, false)
+			_, _, err := callClineAPI(context.Background(), params, false)
 			if err == nil {
 				t.Fatal("direct model request should return upstream quota error")
 			}

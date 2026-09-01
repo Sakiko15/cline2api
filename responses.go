@@ -256,11 +256,12 @@ func chatToResponses(chat map[string]any) map[string]any {
 // ============ 流式响应转换（chat SSE → Responses SSE） ============
 
 type responsesSSEWriter struct {
-	w       http.ResponseWriter
-	flusher http.Flusher
-	msgID   string
-	respID  string
-	model   string
+	w         http.ResponseWriter
+	flusher   http.Flusher
+	msgID     string
+	respID    string
+	model     string
+	writeErr  error // 写失败（客户端断开/停滞）后置位，读循环据此中止（P1-4）
 }
 
 func newResponsesSSE(w http.ResponseWriter) *responsesSSEWriter {
@@ -274,8 +275,14 @@ func newResponsesSSE(w http.ResponseWriter) *responsesSSEWriter {
 }
 
 func (s *responsesSSEWriter) event(event string, data any) {
+	if s.writeErr != nil {
+		return
+	}
 	b, _ := json.Marshal(data)
-	fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, string(b))
+	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, string(b)); err != nil {
+		s.writeErr = err
+		return
+	}
 	if s.flusher != nil {
 		s.flusher.Flush()
 	}
@@ -302,6 +309,9 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, reqLo
 
 	reader := bufio.NewReader(upstream.Body)
 	for {
+		if s.writeErr != nil {
+			break // 客户端已断开/停滞，停止读取上游
+		}
 		line, err := reader.ReadString('\n')
 		if line != "" {
 			line = strings.TrimRight(line, "\r\n")
@@ -498,7 +508,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		if out.changed {
 			log.Printf("  responses %s", out.note)
 		}
-		upResp, err := callZenAPI(chat, isStream)
+		upResp, err := callZenAPI(r.Context(), chat, isStream)
 		if err != nil {
 			log.Printf("  responses api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
@@ -531,7 +541,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	default: // cline
 		reqLog.Upstream = upstreamCline
-		upResp, acc, err := callClineAPI(chat, isStream)
+		upResp, acc, err := callClineAPI(r.Context(), chat, isStream)
 		if effectiveModel, ok := chat["model"].(string); ok && effectiveModel != "" {
 			reqLog.Model = effectiveModel
 		}
