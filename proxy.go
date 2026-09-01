@@ -665,6 +665,12 @@ func clineHeaders(token, sessionID string) http.Header {
 
 	cfg := getProxyConfig()
 	for k, v := range cfg.Headers {
+		// 纵深防御：管理面已拒绝受保护头的覆盖，旧配置文件中可能仍有残留（P2-16）
+		switch http.CanonicalHeaderKey(k) {
+		case "Authorization", "Content-Type", "Host", "Content-Length":
+			log.Printf("  ignoring protected header override from config: %s", k)
+			continue
+		}
 		h.Set(k, v)
 	}
 

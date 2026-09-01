@@ -33,6 +33,14 @@ var apiMessages = map[string]map[locale]string{
 		localeZH: "已拒绝跨站请求：请从后台页面本身发起操作",
 		localeEN: "Cross-site request blocked: please initiate actions from the admin panel itself",
 	},
+	"invalid_header_name": {
+		localeZH: "非法的请求头名称：%s",
+		localeEN: "Invalid header name: %s",
+	},
+	"forbidden_header": {
+		localeZH: "不允许覆盖受保护的请求头：%s",
+		localeEN: "Overriding the protected header is not allowed: %s",
+	},
 	"password_not_enabled": {
 		localeZH: "后台未启用密码",
 		localeEN: "Admin password is not enabled",

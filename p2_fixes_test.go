@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -565,5 +566,116 @@ func TestAdminLoginCookieSecureFlag(t *testing.T) {
 	}
 	if rec := mkReq(""); strings.Contains(rec.Header().Get("Set-Cookie"), "Secure") {
 		t.Fatalf("plain HTTP login must not set Secure cookie, got %q", rec.Header().Get("Set-Cookie"))
+	}
+}
+
+// ---- P2-7 OAuth 会话：懒清扫 + 快照读 ----
+
+func TestOAuthSessionEviction(t *testing.T) {
+	old := oauthSessions
+	t.Cleanup(func() { oauthSessions = old })
+	oauthSessions = map[string]*oauthSessionState{}
+	oauthSessions["stale"] = &oauthSessionState{CreatedAt: time.Now().Add(-oauthSessionTTL - time.Minute)}
+	oauthSessions["fresh"] = &oauthSessionState{CreatedAt: time.Now()}
+
+	oauthSessionsMu.Lock()
+	evictExpiredOAuthSessionsLocked()
+	oauthSessionsMu.Unlock()
+
+	if _, ok := oauthSessions["stale"]; ok {
+		t.Fatal("expired session should be evicted")
+	}
+	if _, ok := oauthSessions["fresh"]; !ok {
+		t.Fatal("fresh session should survive")
+	}
+}
+
+func TestOAuthStatusSnapshotRead(t *testing.T) {
+	old := oauthSessions
+	t.Cleanup(func() { oauthSessions = old })
+	oauthSessions = map[string]*oauthSessionState{}
+	oauthSessions["s1"] = &oauthSessionState{Done: true, Success: true, Email: "a@b.c", CreatedAt: time.Now()}
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/admin/api/oauth/status?sessionId=s1", nil)
+	handleOAuthStatus(rec, r)
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Done    bool   `json:"done"`
+			Success bool   `json:"success"`
+			Email   string `json:"email"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rec.Body.String())
+	}
+	if !resp.Data.Done || !resp.Data.Success || resp.Data.Email != "a@b.c" {
+		t.Fatalf("status snapshot mismatch: %+v", resp.Data)
+	}
+}
+
+// ---- P2-16 上游头覆盖校验 ----
+
+func TestAdminHeaderOverrideValidation(t *testing.T) {
+	oldFile, oldCfg := proxyConfigFile, getProxyConfig()
+	t.Cleanup(func() {
+		proxyConfigMu.Lock()
+		proxyConfig = oldCfg // 仅恢复内存态，不回写磁盘
+		proxyConfigMu.Unlock()
+		proxyConfigFile = oldFile
+	})
+	proxyConfigFile = filepath.Join(t.TempDir(), ".cline-config.json")
+
+	post := func(headers map[string]string) *httptest.ResponseRecorder {
+		payload, _ := json.Marshal(map[string]any{"headers": headers})
+		r := httptest.NewRequest("POST", "/admin/api/config/update", bytes.NewReader(payload))
+		r.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handleAdminUpdateConfig(rec, r)
+		return rec
+	}
+
+	if rec := post(map[string]string{"Bad Header": "x"}); rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), "Bad Header") {
+		t.Fatalf("space in header name should 400 naming the header, got %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(map[string]string{"authorization": "x"}); rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), "authorization") {
+		t.Fatalf("authorization override should 400 naming the header, got %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(map[string]string{"X-Custom-Trace": "t1"}); rec.Code != http.StatusOK {
+		t.Fatalf("valid header should be accepted, got %d %s", rec.Code, rec.Body.String())
+	}
+	if v := getProxyConfig().Headers["X-Custom-Trace"]; v != "t1" {
+		t.Fatalf("valid header should be stored, got %q", v)
+	}
+}
+
+func TestClineHeadersSkipsReserved(t *testing.T) {
+	oldCfg := getProxyConfig()
+	t.Cleanup(func() {
+		proxyConfigMu.Lock()
+		proxyConfig = oldCfg
+		proxyConfigMu.Unlock()
+	})
+	proxyConfigMu.Lock()
+	proxyConfig = &proxyConfigData{Strategy: "round_robin", Headers: map[string]string{
+		"Authorization": "Bearer evil",
+		"Content-Type":  "text/plain",
+		"X-Custom":      "ok",
+	}}
+	proxyConfigMu.Unlock()
+
+	h := clineHeaders("real-token", "sess")
+	if got := h.Get("Authorization"); got != "Bearer real-token" {
+		t.Fatalf("Authorization override must be ignored, got %q", got)
+	}
+	if got := h.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type override must be ignored, got %q", got)
+	}
+	if got := h.Get("X-Custom"); got != "ok" {
+		t.Fatalf("custom header should pass through, got %q", got)
 	}
 }

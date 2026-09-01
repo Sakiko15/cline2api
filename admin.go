@@ -56,7 +56,19 @@ var (
 const (
 	adminSessionCookie = "cline_admin_session"
 	adminSessionTTL    = 24 * time.Hour
+	// oauthSessionTTL OAuth 设备登录会话的最长存活时间；handleOAuthStart 懒清扫过期项
+	oauthSessionTTL = 30 * time.Minute
 )
+
+// evictExpiredOAuthSessions 清理超过 TTL 的 OAuth 会话（调用方需持锁）。
+func evictExpiredOAuthSessionsLocked() {
+	now := time.Now()
+	for id, s := range oauthSessions {
+		if now.Sub(s.CreatedAt) > oauthSessionTTL {
+			delete(oauthSessions, id)
+		}
+	}
+}
 
 func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/", adminStaticHandler)
@@ -222,6 +234,29 @@ func randomHex(n int) string {
 		return ""
 	}
 	return hex.EncodeToString(b)
+}
+
+// forbiddenUpstreamHeaders 不允许经管理面覆盖的请求头——它们由代理自身生成
+// （鉴权/协议语义），覆盖会破坏对上游的请求（P2-16）。
+var forbiddenUpstreamHeaders = map[string]bool{
+	"Authorization":  true,
+	"Content-Type":   true,
+	"Host":           true,
+	"Content-Length": true,
+}
+
+// validHeaderName 校验头名为合法的 RFC 7230 token（排除分隔符与非可见 ASCII）。
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c <= ' ' || c >= 0x7f || strings.ContainsRune("()<>@,;:\\\"/[]?={}", rune(c)) {
+			return false
+		}
+	}
+	return true
 }
 
 // requestIsHTTPS 判断请求是否经由 HTTPS 到达（直连 TLS 或反代转发 X-Forwarded-Proto）。
@@ -475,6 +510,7 @@ func handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	oauthSessionsMu.Lock()
+	evictExpiredOAuthSessionsLocked()
 	oauthSessions[sessionID] = state
 	oauthSessionsMu.Unlock()
 
@@ -553,6 +589,10 @@ func handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 
 	oauthSessionsMu.Lock()
 	state, ok := oauthSessions[sessionID]
+	if ok {
+		snap := *state // 锁内拷贝快照：后台轮询 goroutine 持锁改写字段（P2-7）
+		state = &snap
+	}
 	oauthSessionsMu.Unlock()
 
 	if !ok {
@@ -1095,6 +1135,16 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Headers != nil {
+		for k := range req.Headers {
+			if !validHeaderName(k) {
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_header_name", k)})
+				return
+			}
+			if forbiddenUpstreamHeaders[http.CanonicalHeaderKey(k)] {
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "forbidden_header", k)})
+				return
+			}
+		}
 		for k, v := range req.Headers {
 			cfg.Headers[k] = v
 		}
