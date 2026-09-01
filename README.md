@@ -69,6 +69,16 @@ docker compose down        # 停止
 
 容器内已配置监听 `0.0.0.0:3457`（`-p 3457:3457` 映射对外可达），管理后台同样无鉴权，请勿将端口暴露到公网。
 
+### 方式四：远程镜像（服务器 / 1Panel 编排）
+
+无需本地构建，直接拉取 GHCR 多架构镜像（linux/amd64、linux/arm64），镜像由 CI 在推送 `v*` 标签时自动发布：
+
+```bash
+docker pull ghcr.io/sakiko15/cline2api:latest
+```
+
+在 VPS 上推荐使用 1Panel 的 **容器 → 编排** 部署，完整步骤（含数据文件预创建、管理后台密码设置、升级与回滚）见 [docs/deploy-1panel.md](docs/deploy-1panel.md)。
+
 ## 使用指南
 
 ### 1. 添加 Cline 账号

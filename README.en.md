@@ -68,6 +68,16 @@ docker compose down       # stop
 
 The container listens on `0.0.0.0:3457` (`-p 3457:3457` maps it externally). The admin panel has no auth by default — do **not** expose the port to the public internet.
 
+### Option 4: Prebuilt image (server / 1Panel)
+
+No local build needed — pull the multi-arch image (linux/amd64, linux/arm64) from GHCR; CI publishes it automatically on `v*` tags:
+
+```bash
+docker pull ghcr.io/sakiko15/cline2api:latest
+```
+
+For VPS deployments, 1Panel's **Containers → Orchestration** is recommended. Full walkthrough (data-file pre-creation, admin password, upgrade & rollback): see [docs/deploy-1panel.md](docs/deploy-1panel.md).
+
 ## Usage Guide
 
 ### 1. Add a Cline account
