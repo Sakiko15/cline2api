@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -472,7 +472,9 @@ var zenUserAgents = []string{
 
 func randHex(n int) string {
 	b := make([]byte, n)
-	rand.Read(b)
+	if _, err := cryptoRandRead(b); err != nil {
+		zenRandFallbackBytes(b) // P3-9：随机源失败时退化，不静默产出全零
+	}
 	return hex.EncodeToString(b)
 }
 
@@ -481,12 +483,38 @@ func randIntn(n int) int {
 		return 0
 	}
 	b := make([]byte, 4)
-	rand.Read(b)
+	if _, err := cryptoRandRead(b); err != nil {
+		zenRandFallbackBytes(b)
+	}
 	v := int(b[0])<<24 | int(b[1])<<16 | int(b[2])<<8 | int(b[3])
 	if v < 0 {
 		v = -v
 	}
 	return v % n
+}
+
+// zenRandDegradedWarn crypto/rand 失败告警只提示一次（P3-9）。
+var zenRandDegradedWarn sync.Once
+
+// zenRandFallbackSeq 退化熵的单调计数成分（P3-9）。
+var zenRandFallbackSeq atomic.Uint64
+
+// zenRandFallbackBytes crypto/rand 不可用时的退化熵填充：时间戳 + 单调计数 +
+// 黄金比例散列混合。仅用于 zen 身份轮换（session/request-id/UA 选择），非安全
+// 边界，可用性优先，不 panic；计数保证同刻连续调用结果仍可变。
+func zenRandFallbackBytes(b []byte) {
+	zenRandDegradedWarn.Do(func() {
+		log.Printf("crypto/rand unavailable, degrading zen identity entropy to time+counter")
+	})
+	for i := 0; i < len(b); i += 8 {
+		seq := zenRandFallbackSeq.Add(1)
+		v := uint64(time.Now().UnixNano())
+		v ^= seq << 32
+		v ^= (seq * 0x9E3779B97F4A7C15) >> 17
+		for j := 0; j < 8 && i+j < len(b); j++ {
+			b[i+j] = byte(v >> (uint(j) * 8))
+		}
+	}
 }
 
 // withRetryJitter 在退避时长上叠加 0~25% 抖动，错开并发重试。

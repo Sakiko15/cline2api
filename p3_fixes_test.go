@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -646,5 +647,79 @@ func TestSetAdminPasswordUsesPBKDF2(t *testing.T) {
 	}
 	if loadPool().AdminPasswordHash != "" {
 		t.Fatalf("clear must empty hash")
+	}
+}
+
+// ---- P3-9：随机源失败 fail-closed 与退化熵 ----
+
+func stubBrokenCryptoRand(t *testing.T) {
+	t.Helper()
+	oldRead := cryptoRandRead
+	cryptoRandRead = func(b []byte) (int, error) { return 0, errors.New("stub: crypto/rand unavailable") }
+	t.Cleanup(func() { cryptoRandRead = oldRead })
+}
+
+func TestRandomHexFailClosed(t *testing.T) {
+	stubBrokenCryptoRand(t)
+
+	// 登录密码校验通过但 token 生成失败 → 500，且无新会话
+	oldPool := pool
+	t.Cleanup(func() {
+		pool = oldPool
+		resetLoginAttempts()
+	})
+	pool = &AccountPool{
+		Accounts: []*Account{}, Keys: []string{}, Models: []Model{},
+		AdminPasswordSalt: "s", AdminPasswordHash: hashAdminPassword("s", "pw"),
+	}
+	resetLoginAttempts()
+
+	adminSessionsMu.Lock()
+	sessionsBefore := len(adminSessions)
+	adminSessionsMu.Unlock()
+	if rec := postLogin("pw"); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("login with broken rand = %d, want 500", rec.Code)
+	}
+	adminSessionsMu.Lock()
+	sessionsAfter := len(adminSessions)
+	adminSessionsMu.Unlock()
+	if sessionsAfter != sessionsBefore {
+		t.Fatalf("failed login must not create a session (%d -> %d)", sessionsBefore, sessionsAfter)
+	}
+
+	// key 生成失败 → 500，且 Keys 不变
+	oldKeys := append([]string(nil), pool.Keys...)
+	r := httptest.NewRequest("POST", "http://localhost:3457/admin/api/keys/generate", nil)
+	rec := httptest.NewRecorder()
+	handleAdminGenerateKey(rec, r)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("key gen with broken rand = %d, want 500", rec.Code)
+	}
+	if got := loadPool().Keys; len(got) != len(oldKeys) {
+		t.Fatalf("failed key gen must not modify Keys (%d -> %d)", len(oldKeys), len(got))
+	}
+
+	// randomHex 本身返回错误而非空串
+	if s, err := randomHex(8); err == nil || s != "" {
+		t.Fatalf("randomHex with broken rand = (%q, %v), want error and empty string", s, err)
+	}
+}
+
+func TestZenRandHexFallbackVaries(t *testing.T) {
+	stubBrokenCryptoRand(t)
+
+	a := randHex(16)
+	b := randHex(16)
+	if a == b {
+		t.Fatalf("degraded entropy must vary between calls: %q == %q", a, b)
+	}
+	if a == strings.Repeat("0", 32) {
+		t.Fatalf("degraded entropy must not be all zeros: %q", a)
+	}
+	// randIntn 退化下仍在范围内
+	for i := 0; i < 100; i++ {
+		if v := randIntn(7); v < 0 || v >= 7 {
+			t.Fatalf("randIntn degraded = %d, out of range [0,7)", v)
+		}
 	}
 }

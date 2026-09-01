@@ -334,7 +334,7 @@ var adminPBKDF2Iterations = 600000
 // 随机数或 KDF 失败返回 error（fail-closed，绝不回退到弱哈希）。
 func newAdminPasswordHash(password string) (hash, salt string, err error) {
 	saltBytes := make([]byte, 16)
-	if _, err := rand.Read(saltBytes); err != nil {
+	if _, err := cryptoRandRead(saltBytes); err != nil {
 		return "", "", fmt.Errorf("generate salt: %w", err)
 	}
 	key, err := pbkdf2.Key(sha256.New, password, saltBytes, adminPBKDF2Iterations, sha256.Size)
@@ -436,13 +436,18 @@ func upgradeAdminPasswordHash(password string) {
 	log.Printf("admin password hash upgraded to PBKDF2")
 }
 
+// cryptoRandRead 随机源 seam（P3-9）：测试可注入故障验证 fail-closed 路径。
+var cryptoRandRead = rand.Read
+
 // randomHex 生成 n 字节随机数的 hex 字符串。
-func randomHex(n int) string {
+// P3-9：随机源失败返回 error（调用方 fail-closed），绝不再返回空串——
+// 空串会话键可被伪造、空 API key 等于无鉴权。
+func randomHex(n int) (string, error) {
 	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return ""
+	if _, err := cryptoRandRead(b); err != nil {
+		return "", fmt.Errorf("crypto/rand: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 // forbiddenUpstreamHeaders 不允许经管理面覆盖的请求头——它们由代理自身生成
@@ -520,7 +525,11 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		if legacy { // P3-8：存量单轮 SHA-256 哈希在首次成功登录时透明迁移
 			upgradeAdminPasswordHash(req.Password)
 		}
-	token := randomHex(32)
+	token, err := randomHex(32)
+	if err != nil { // P3-9：空串会话键可被伪造，随机源失败必须 fail-closed
+		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: tAPI(r, "internal_error")})
+		return
+	}
 	adminSessionsMu.Lock()
 	adminSessions[token] = time.Now().Add(adminSessionTTL)
 	adminSessionsMu.Unlock()
@@ -1290,7 +1299,12 @@ func handleAdminGenerateKey(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: tAPI(r, "method_not_allowed")})
 		return
 	}
-	key := "cline_" + randomHex(32) // 256-bit 随机，不含时间戳可预测成分（P2-3）
+	keyHex, err := randomHex(32) // 256-bit 随机，不含时间戳可预测成分（P2-3）
+	if err != nil { // P3-9："cline_" 空尾 key 等于无鉴权，随机源失败必须 fail-closed
+		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: tAPI(r, "internal_error")})
+		return
+	}
+	key := "cline_" + keyHex
 	p := loadPool()
 	poolMu.Lock()
 	p.Keys = append(p.Keys, key)
