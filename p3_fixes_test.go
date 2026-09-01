@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -143,6 +146,78 @@ func TestRoundRobinIndependentOfFilteredList(t *testing.T) {
 		if got[i] != w {
 			t.Fatalf("pick %d = %s, want %s (sequence %v)", i, got[i], w, got)
 		}
+	}
+}
+
+// ---- P3-3/P3-11：health 精简 + 空池守卫实时化 ----
+
+func TestHealthMinimalBody(t *testing.T) {
+	baseURL := protocolTestServer(t)
+	for _, path := range []string{"/health", "/v1/health"} {
+		resp, err := http.Get(baseURL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200", path, resp.StatusCode)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(body, &m); err != nil {
+			t.Fatalf("GET %s body unparseable: %v", path, err)
+		}
+		if len(m) != 1 || m["status"] != "ok" {
+			t.Fatalf("GET %s body = %s, want only {\"status\":\"ok\"}", path, body)
+		}
+	}
+}
+
+func TestChatRejectsOnlyWhenPoolEmpty(t *testing.T) {
+	baseURL := protocolTestServer(t)
+
+	// 空池：401
+	oldPool := pool
+	pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}, Models: []Model{}}
+	resp, err := http.Post(baseURL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"m","messages":[]}`))
+	if err != nil {
+		t.Fatalf("POST empty pool: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("empty pool POST = %d, want 401", resp.StatusCode)
+	}
+
+	// 仅有冷却账号的池：守卫放行（不再被启动快照误拦），由上游返回决定结果
+	cooldownAcc := &Account{
+		AccountID:   "cooldown-only",
+		Email:       "cool@example.com",
+		AccessToken: "tok",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{cooldownAcc}, Keys: []string{}, Models: []Model{}}
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		httpClient.Transport = oldTransport
+	})
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"ok","choices":[{"message":{"role":"assistant","content":"hi"}}]}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	resp, err = http.Post(baseURL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"some-model","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("POST cooldown-only pool: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("cooldown-only pool POST = %d, want 200; body=%s", resp.StatusCode, body)
 	}
 }
 

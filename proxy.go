@@ -302,20 +302,13 @@ func startProxy(host string, port int) error {
 
 	mux := http.NewServeMux()
 
+	// 健康端点只回 status（P3-11）：version/账号数此前无鉴权可指纹；
+	// 已知消费方（docker healthcheck、desktop selfcheck）只看状态码
 	mux.HandleFunc("/v1/health", corsHandler(func(w http.ResponseWriter, r *http.Request) {
-		info := map[string]any{
-			"status":         "ok",
-			"version":        appVersion,
-			"activeAccounts": activeCount,
-		}
-		writeJSON(w, http.StatusOK, info)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}))
 	mux.HandleFunc("/health", corsHandler(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"status":         "ok",
-			"version":        appVersion,
-			"activeAccounts": activeCount,
-		})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}))
 
 	// Admin API (frontend + REST)
@@ -390,7 +383,8 @@ func startProxy(host string, port int) error {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
-		if activeCount == 0 && len(loadPool().Accounts) == 0 {
+		// 只在池内完全无账号时拒绝（P3-3：启动快照 activeCount 会陈旧）
+		if len(loadPool().Accounts) == 0 {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{
 				"error": map[string]string{
 					"message": "No accounts in pool. Run with --add-account or POST /admin/login to add accounts.",
@@ -476,7 +470,7 @@ func startProxy(host string, port int) error {
 			return
 		}
 
-		if activeCount == 0 && len(loadPool().Accounts) == 0 {
+		if len(loadPool().Accounts) == 0 {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{
 				"error": map[string]string{
 					"message": "No accounts in pool. Run with --add-account or POST /admin/login to add accounts.",
@@ -1816,15 +1810,8 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeCount := 0
 	p := loadPool()
-	for _, a := range p.Accounts {
-		if a.Status == "active" {
-			activeCount++
-		}
-	}
-
-	if activeCount == 0 && len(p.Accounts) == 0 {
+	if len(p.Accounts) == 0 { // P3-3：实时判池空，不用启动快照
 		writeJSON(w, http.StatusUnauthorized, map[string]any{
 			"error": map[string]string{
 				"message": "No accounts in pool",
