@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -220,6 +221,46 @@ func TestRestartListenerBindFailureKeepsOldListener(t *testing.T) {
 	conn, err := net.DialTimeout("tcp", ln.Addr().String(), time.Second)
 	if err != nil {
 		t.Fatalf("old listener died after failed restart: %v", err)
+	}
+	conn.Close()
+}
+
+// ---- P1-9 回归修复：同端口换地址时先停旧监听再重绑，服务不中断 ----
+
+func TestRestartListenerSamePortRetakes(t *testing.T) {
+	oldHost, oldPort := listenHost, listenPort
+	oldServer := currentServer
+	oldMux := serverMux
+	t.Cleanup(func() {
+		listenHost, listenPort = oldHost, oldPort
+		serverMux = oldMux
+		if cu := currentServer; cu != nil && cu != oldServer {
+			cu.Close() // 停掉测试期间启动的 Serve
+		}
+		currentServer = oldServer
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	// 真实模拟旧监听：http.Server 持有该端口并在 Serve（Shutdown 会关闭其 listener）
+	oldSrv := &http.Server{Handler: http.NewServeMux()}
+	go oldSrv.Serve(ln)
+	currentServer = oldSrv
+	serverMux = http.NewServeMux()
+
+	done := make(chan error, 1)
+	go func() { done <- restartListener("127.0.0.1", port) }()
+	select {
+	case err := <-done:
+		t.Fatalf("restartListener should keep serving on same-port retake, returned %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	if err != nil {
+		t.Fatalf("new listener not serving after same-port restart: %v", err)
 	}
 	conn.Close()
 }

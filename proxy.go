@@ -133,26 +133,41 @@ func restartListener(host string, port int) error {
 	}
 	addr := fmt.Sprintf("%s:%d", host, port)
 
-	// 先绑定新地址：bind 失败直接返回错误，旧监听不受影响（P1-9，
-	// 旧实现先 Shutdown 再 ListenAndServe，绑定失败会导致零监听、全代理下线）
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("bind %s: %w", addr, err)
-	}
-
 	serverMu.Lock()
 	old := currentServer
+	serverMu.Unlock()
+
+	shutdownOld := func() {
+		if old == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = old.Shutdown(ctx)
+		cancel()
+	}
+
+	// 先绑定新地址：目标端口被无关进程占用时 bind 失败直接返回，旧监听不受影响
+	// （P1-9：旧实现先 Shutdown 再 ListenAndServe，绑定失败会导致零监听、全代理下线）
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		// 同端口换地址等场景：端口仍被旧监听自身占用 → 停旧后重试一次
+		shutdownOld()
+		old = nil
+		ln, err = net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("bind %s: %w", addr, err)
+		}
+	}
+
 	server := &http.Server{Addr: addr, Handler: serverMux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
+	serverMu.Lock()
 	currentServer = server
 	serverMu.Unlock()
 	listenHost = host
 	listenPort = port
 
-	if old != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_ = old.Shutdown(ctx)
-		cancel()
-	}
+	// 绑定成功后才停旧监听（若上一步未停）
+	shutdownOld()
 
 	fmt.Println("")
 	fmt.Println(strings.Repeat("=", 58))
