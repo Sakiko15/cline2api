@@ -1085,11 +1085,13 @@ func testAccount(acc *Account) accountTestResult {
 }
 
 type tokenUsage struct {
-	Prompt     int64
-	Completion int64
-	Total      int64
-	Cached     int64
-	Valid      bool
+	Prompt        int64
+	Completion    int64
+	Total         int64
+	Cached        int64
+	CacheRead     int64
+	CacheCreation int64
+	Valid         bool
 }
 
 func parseTokenUsage(value any) tokenUsage {
@@ -1130,6 +1132,17 @@ func parseTokenUsage(value any) tokenUsage {
 	} else {
 		cached = read("prompt_cache_hit_tokens", "prompt_cache_creation_tokens", "cached_tokens")
 	}
+	// 缓存读/写分开记（Anthropic usage 需要两个独立字段）；与上面 Cached 链各自独立，
+	// 读序沿用 nested cached_tokens 优先、显式键兜底。
+	cacheRead := int64(0)
+	if nested := readNested("prompt_tokens_details", "cached_tokens"); nested > 0 {
+		cacheRead = nested
+	} else if nested := readNested("input_tokens_details", "cached_tokens"); nested > 0 {
+		cacheRead = nested
+	} else {
+		cacheRead = read("cache_read_input_tokens")
+	}
+	cacheCreation := read("cache_creation_input_tokens")
 	total := read("total_tokens")
 	if total == 0 {
 		total = prompt + completion
@@ -1157,7 +1170,7 @@ func parseTokenUsage(value any) tokenUsage {
 			}
 		}
 	}
-	return tokenUsage{Prompt: prompt, Completion: completion, Total: total, Cached: cached, Valid: hasUsage}
+	return tokenUsage{Prompt: prompt, Completion: completion, Total: total, Cached: cached, CacheRead: cacheRead, CacheCreation: cacheCreation, Valid: hasUsage}
 }
 
 func mergeTokenUsage(current, next tokenUsage) tokenUsage {
@@ -1175,6 +1188,12 @@ func mergeTokenUsage(current, next tokenUsage) tokenUsage {
 	}
 	if next.Cached != 0 {
 		current.Cached = next.Cached
+	}
+	if next.CacheRead != 0 {
+		current.CacheRead = next.CacheRead
+	}
+	if next.CacheCreation != 0 {
+		current.CacheCreation = next.CacheCreation
 	}
 	current.Valid = current.Valid || next.Valid
 	if current.Total == 0 && (current.Prompt != 0 || current.Completion != 0) {
@@ -1730,7 +1749,8 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 	if choice0 == nil {
 		out["content"] = []any{map[string]any{"type": "text", "text": ""}}
 		out["stop_reason"] = "end_turn"
-		out["usage"] = map[string]any{"input_tokens": 0, "output_tokens": 0}
+		out["stop_sequence"] = nil
+		out["usage"] = map[string]any{"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
 		return out
 	}
 	msg, _ := choice0["message"].(map[string]any)
@@ -1785,6 +1805,8 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 		stopReason = "max_tokens"
 	case "tool_calls":
 		stopReason = "tool_use"
+	case "content_filter":
+		stopReason = "refusal"
 	}
 	// 上游报 stop 但实际给了 tool_calls（部分上游如此）：Anthropic 语义必须 tool_use
 	if stopReason == "end_turn" {
@@ -1796,12 +1818,31 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 		}
 	}
 	out["stop_reason"] = stopReason
+	out["stop_sequence"] = nil
 
-	usage := map[string]any{}
+	usage := map[string]any{
+		"input_tokens":                0,
+		"output_tokens":               0,
+		"cache_creation_input_tokens": 0,
+		"cache_read_input_tokens":     0,
+	}
 	if u := getNested(openAI, "usage"); u != nil {
 		if um, ok := u.(map[string]any); ok {
-			usage["input_tokens"] = um["prompt_tokens"]
-			usage["output_tokens"] = um["completion_tokens"]
+			// 仅在上游真的给出该键时覆盖，避免 usage 存在但缺 prompt_tokens 时输出 null/0 混排
+			if v, ok := um["prompt_tokens"]; ok {
+				usage["input_tokens"] = v
+			}
+			if v, ok := um["completion_tokens"]; ok {
+				usage["output_tokens"] = v
+			}
+			if tu := parseTokenUsage(u); tu.Valid {
+				if tu.CacheRead > 0 {
+					usage["cache_read_input_tokens"] = tu.CacheRead
+				}
+				if tu.CacheCreation > 0 {
+					usage["cache_creation_input_tokens"] = tu.CacheCreation
+				}
+			}
 		}
 	}
 	out["usage"] = usage
@@ -1978,12 +2019,15 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	emit("message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
-			"id":          msgID,
-			"type":        "message",
-			"role":        "assistant",
-			"content":     []any{},
-			"model":       "",
-			"stop_reason": nil,
+			"id":      msgID,
+			"type":    "message",
+			"role":    "assistant",
+			"content": []any{},
+			"model":   reqLog.Model,
+			// Anthropic 规范：message_start 携带完整 message 形状，usage 从 0 起步
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage":         map[string]any{"input_tokens": 0, "output_tokens": 0},
 		},
 	})
 
@@ -2203,6 +2247,8 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 				stopReason = "max_tokens"
 			case "tool_calls":
 				stopReason = "tool_use"
+			case "content_filter":
+				stopReason = "refusal"
 			}
 		}
 	}
@@ -2260,15 +2306,23 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		})
 	}
 
+	deltaUsage := map[string]any{
+		"input_tokens":  latestUsage.Prompt,
+		"output_tokens": latestUsage.Completion,
+	}
+	if latestUsage.CacheCreation > 0 {
+		deltaUsage["cache_creation_input_tokens"] = latestUsage.CacheCreation
+	}
+	if latestUsage.CacheRead > 0 {
+		deltaUsage["cache_read_input_tokens"] = latestUsage.CacheRead
+	}
 	emit("message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
 			"stop_reason":   stopReason,
 			"stop_sequence": nil,
 		},
-		"usage": map[string]any{
-			"output_tokens": latestUsage.Completion,
-		},
+		"usage": deltaUsage,
 	})
 	recordTokenUsage(acc, reqLog.Model, latestUsage)
 	finalizeRequestLog(reqLog, latestUsage, firstOutputAt, reqLog.StartedAt, true, "")
