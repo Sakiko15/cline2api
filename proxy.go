@@ -1626,6 +1626,55 @@ func mapAnthropicToolChoice(raw json.RawMessage) any {
 	}
 }
 
+// imageUnsupportedOnce P4-4：不支持的 image source 形态只告警一次，避免刷日志
+var imageUnsupportedOnce sync.Once
+
+// imageBlockToOpenAI 把 Anthropic image 块转成 OpenAI image_url part（P4-4）。
+// base64 → data URL；url source → 原样透传；其余/缺字段形态返回 false 由调用方告警。
+func imageBlockToOpenAI(block map[string]any) (map[string]any, bool) {
+	source, _ := block["source"].(map[string]any)
+	if source == nil {
+		return nil, false
+	}
+	switch source["type"] {
+	case "base64":
+		mediaType, _ := source["media_type"].(string)
+		data, _ := source["data"].(string)
+		if mediaType == "" || data == "" {
+			return nil, false
+		}
+		return map[string]any{
+			"type":      "image_url",
+			"image_url": map[string]any{"url": "data:" + mediaType + ";base64," + data},
+		}, true
+	case "url":
+		if u, ok := source["url"].(string); ok && u != "" {
+			return map[string]any{
+				"type":      "image_url",
+				"image_url": map[string]any{"url": u},
+			}, true
+		}
+	}
+	return nil, false
+}
+
+// userContentMessage 组装可能含图片的 user 轮内容（P4-4）：text part 在前、
+// 图片 parts 在后；无图片回落纯文本字符串；全空返回 nil（调用方不得追加空消息）。
+func userContentMessage(textParts []string, imageParts []any) map[string]any {
+	if len(imageParts) == 0 {
+		if len(textParts) == 0 {
+			return nil
+		}
+		return map[string]any{"role": "user", "content": strings.Join(textParts, "\n")}
+	}
+	parts := []any{}
+	if len(textParts) > 0 {
+		parts = append(parts, map[string]any{"type": "text", "text": strings.Join(textParts, "\n")})
+	}
+	parts = append(parts, imageParts...)
+	return map[string]any{"role": "user", "content": parts}
+}
+
 func anthropicToOpenAI(req anthropicReq) map[string]any {
 	openAI := map[string]any{
 		"model":      req.Model,
@@ -1678,6 +1727,7 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 			textParts := []string{}
 			var toolCalls []any
 			var toolResults []any // 并行工具调用可有多个 tool_result，全部保留（P1-13）
+			var imageParts []any  // P4-4：Anthropic image 块转 OpenAI image_url（仅 user 轮）
 
 			for _, block := range c {
 				if b, ok := block.(map[string]any); ok {
@@ -1687,7 +1737,15 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 							textParts = append(textParts, t)
 						}
 					case "image":
-						// skip images
+						// P4-4：仅 user 轮转换（assistant 图片在 OpenAI 请求里没有
+						// 合法承载位，继续跳过）；不支持的 source 形态告警一次后跳过
+						if part, ok := imageBlockToOpenAI(b); ok && m.Role == "user" {
+							imageParts = append(imageParts, part)
+						} else if !ok {
+							imageUnsupportedOnce.Do(func() {
+								log.Printf("  anthropic: unsupported image source type, block skipped (upstream support unverified)")
+							})
+						}
 					case "tool_use":
 						argsStr := "{}"
 						if input, ok := b["input"]; ok && input != nil {
@@ -1732,12 +1790,12 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 					"tool_calls": toolCalls,
 				}
 				msgs = append(msgs, msg)
-			} else if m.Role == "user" && len(toolResults) > 0 {
+			} else if m.Role == "user" && (len(toolResults) > 0 || len(imageParts) > 0) {
+				// tool_result 与图片可同轮并存（Anthropic 混合轮）；user 轮文本
+				// 不再丢弃（P4-2），textParts 为空且无图片时不追加空 user 消息
 				msgs = append(msgs, toolResults...)
-				// user 轮 text 与 tool_result 并存：Anthropic 允许混合轮，纯丢弃文本
-				// 会丢失用户附带指令（P4-2）；textParts 为空时不追加空 user 消息
-				if len(textParts) > 0 {
-					msgs = append(msgs, map[string]any{"role": "user", "content": strings.Join(textParts, "\n")})
+				if u := userContentMessage(textParts, imageParts); u != nil {
+					msgs = append(msgs, u)
 				}
 			} else {
 				content := strings.Join(textParts, "\n")

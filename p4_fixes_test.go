@@ -272,3 +272,182 @@ func TestAnthropicToOpenAIToolResultErrorPrefix(t *testing.T) {
 		t.Fatalf("array content should stay array, got %T: %v", m["content"], m["content"])
 	}
 }
+
+// ---- P4-4：image 块转 OpenAI image_url ----
+
+func TestAnthropicToOpenAIImageBase64(t *testing.T) {
+	req := anthropicReq{Model: "m", MaxTokens: 100}
+	req.Messages = []anthropicMsg{{Role: "user", Content: []any{
+		map[string]any{"type": "text", "text": "what is this?"},
+		map[string]any{"type": "image", "source": map[string]any{
+			"type": "base64", "media_type": "image/png", "data": "aGk=",
+		}},
+	}}}
+	out := anthropicToOpenAI(req)
+	msgs := out["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("want single merged user message, got %d: %v", len(msgs), msgs)
+	}
+	m := msgs[0].(map[string]any)
+	parts, ok := m["content"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("content should be 2-part array, got %T %v", m["content"], m["content"])
+	}
+	if parts[0].(map[string]any)["type"] != "text" {
+		t.Fatalf("first part should be text: %v", parts[0])
+	}
+	img := parts[1].(map[string]any)
+	if img["type"] != "image_url" {
+		t.Fatalf("second part type = %v, want image_url", img["type"])
+	}
+	url := img["image_url"].(map[string]any)["url"]
+	if url != "data:image/png;base64,aGk=" {
+		t.Fatalf("data URL = %v", url)
+	}
+}
+
+func TestAnthropicToOpenAIImageURLSource(t *testing.T) {
+	req := anthropicReq{Model: "m", MaxTokens: 100}
+	req.Messages = []anthropicMsg{{Role: "user", Content: []any{
+		map[string]any{"type": "image", "source": map[string]any{
+			"type": "url", "url": "https://example.com/a.png",
+		}},
+	}}}
+	out := anthropicToOpenAI(req)
+	parts := out["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	img := parts[0].(map[string]any)
+	if img["type"] != "image_url" {
+		t.Fatalf("part type = %v, want image_url", img["type"])
+	}
+	if got := img["image_url"].(map[string]any)["url"]; got != "https://example.com/a.png" {
+		t.Fatalf("url = %v", got)
+	}
+}
+
+// 不支持的 source 形态（file 类型）：块跳过、纯文本轮回落字符串
+func TestAnthropicToOpenAIImageUnsupportedSourceSkipped(t *testing.T) {
+	req := anthropicReq{Model: "m", MaxTokens: 100}
+	req.Messages = []anthropicMsg{{Role: "user", Content: []any{
+		map[string]any{"type": "text", "text": "describe"},
+		map[string]any{"type": "image", "source": map[string]any{"type": "document", "media_type": "application/pdf"}},
+	}}}
+	out := anthropicToOpenAI(req)
+	m := out["messages"].([]any)[0].(map[string]any)
+	if m["content"] != "describe" {
+		t.Fatalf("content = %v, want plain string after skip", m["content"])
+	}
+}
+
+// 纯图片 user 轮：parts 数组只有 image part
+func TestAnthropicToOpenAIImageOnlyUserTurn(t *testing.T) {
+	req := anthropicReq{Model: "m", MaxTokens: 100}
+	req.Messages = []anthropicMsg{{Role: "user", Content: []any{
+		map[string]any{"type": "image", "source": map[string]any{
+			"type": "base64", "media_type": "image/jpeg", "data": "anew",
+		}},
+	}}}
+	out := anthropicToOpenAI(req)
+	msgs := out["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 message, got %d", len(msgs))
+	}
+	parts := msgs[0].(map[string]any)["content"].([]any)
+	if len(parts) != 1 || parts[0].(map[string]any)["type"] != "image_url" {
+		t.Fatalf("want single image part, got %v", parts)
+	}
+}
+
+// assistant 轮的 image 仍被跳过（OpenAI 请求无承载位），tool_calls 不受影响
+func TestAnthropicToOpenAIImageAssistantSkipped(t *testing.T) {
+	req := anthropicReq{Model: "m", MaxTokens: 100}
+	req.Messages = []anthropicMsg{{Role: "assistant", Content: []any{
+		map[string]any{"type": "image", "source": map[string]any{
+			"type": "base64", "media_type": "image/png", "data": "aGk=",
+		}},
+		map[string]any{"type": "tool_use", "id": "c1", "name": "f", "input": map[string]any{"a": 1}},
+	}}}
+	out := anthropicToOpenAI(req)
+	m := out["messages"].([]any)[0].(map[string]any)
+	if _, isStr := m["content"].(string); !isStr {
+		t.Fatalf("assistant content should stay string, got %T", m["content"])
+	}
+	if len(m["tool_calls"].([]any)) != 1 {
+		t.Fatalf("tool_calls lost: %v", m["tool_calls"])
+	}
+}
+
+// 端到端：/v1/messages 带图片请求 → 上游收到 image_url part
+func TestAnthropicMessagesImageForwarded(t *testing.T) {
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+	})
+
+	pool = &AccountPool{Accounts: []*Account{{
+		AccountID:   "img-e2e",
+		Email:       "img-e2e@example.com",
+		AccessToken: "img-e2e-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}}}
+	setProxyConfig(defaultProxyConfig())
+
+	var captured map[string]any
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(body, &captured); err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"id":"ok","model":"m","choices":[{"message":{"role":"assistant","content":"seen"},"finish_reason":"stop"}]}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+
+	baseURL := protocolTestServer(t)
+	payload := `{"model":"some-pool-model","max_tokens":100,"messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"what is this?"},` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]}]}`
+	resp, err := http.Post(baseURL+"/v1/messages", "application/json", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("send request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d: %s", resp.StatusCode, body)
+	}
+
+	// 上游请求体：user 轮 content 是 parts 数组，第二段是 image_url
+	msgs := captured["messages"].([]any)
+	var lastUser map[string]any
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if m := msgs[i].(map[string]any); m["role"] == "user" {
+			lastUser = m
+			break
+		}
+	}
+	if lastUser == nil {
+		t.Fatalf("no user message in upstream body: %v", captured)
+	}
+	parts, ok := lastUser["content"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("upstream user content should be 2-part array, got %T %v", lastUser["content"], lastUser["content"])
+	}
+	img := parts[1].(map[string]any)
+	if img["type"] != "image_url" {
+		t.Fatalf("upstream part type = %v", img["type"])
+	}
+	if got := img["image_url"].(map[string]any)["url"]; got != "data:image/png;base64,aGk=" {
+		t.Fatalf("upstream data URL = %v", got)
+	}
+}
