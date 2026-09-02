@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -131,20 +132,42 @@ func clientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// loginIsLocked 报告该 IP 是否处于锁定期；到期顺手清零并惰性清理过期项。
+// sweepLoginAttemptsLocked 全量清扫空置/过期项，并把 map 压回硬上限
+// 2×loginLockoutSweepMax（P5-9：旧实现 len<=512 门限在超限后永不清扫，
+// 恶意流量可无界增长）。超限时按 lockedUntil 最早逐出——零值（未锁定的
+// 连败计数）排最前，先于任何活跃锁被逐出。
+func sweepLoginAttemptsLocked(now time.Time) {
+	for k, st := range loginAttempts {
+		if st.lockedUntil.IsZero() && st.fails == 0 {
+			delete(loginAttempts, k)
+		} else if !st.lockedUntil.IsZero() && now.After(st.lockedUntil) {
+			delete(loginAttempts, k)
+		}
+	}
+	excess := len(loginAttempts) - 2*loginLockoutSweepMax
+	if excess <= 0 {
+		return
+	}
+	type ipLock struct {
+		ip    string
+		until time.Time
+	}
+	all := make([]ipLock, 0, len(loginAttempts))
+	for k, st := range loginAttempts {
+		all = append(all, ipLock{k, st.lockedUntil})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].until.Before(all[j].until) })
+	for i := 0; i < excess; i++ {
+		delete(loginAttempts, all[i].ip)
+	}
+}
+
+// loginIsLocked 报告该 IP 是否处于锁定期；到期顺手清零并全量清扫过期项。
 func loginIsLocked(ip string) bool {
 	now := time.Now()
 	loginAttemptsMu.Lock()
 	defer loginAttemptsMu.Unlock()
-	if len(loginAttempts) > 0 && len(loginAttempts) <= loginLockoutSweepMax {
-		for k, st := range loginAttempts {
-			if st.lockedUntil.IsZero() && st.fails == 0 {
-				delete(loginAttempts, k)
-			} else if !st.lockedUntil.IsZero() && now.After(st.lockedUntil) {
-				delete(loginAttempts, k)
-			}
-		}
-	}
+	sweepLoginAttemptsLocked(now)
 	st, ok := loginAttempts[ip]
 	if !ok {
 		return false
@@ -1026,6 +1049,8 @@ func handleExportAccounts(w http.ResponseWriter, r *http.Request) {
 		RefreshToken string `json:"refreshToken"`
 		Email        string `json:"email"`
 	}
+	// P5-9：RefreshToken 读收进 poolMu 快照（与 token 刷新轮换的锁内写并发）
+	poolMu.Lock()
 	tokens := make([]exportToken, 0, len(p.Accounts))
 	for _, acc := range p.Accounts {
 		if acc.RefreshToken != "" {
@@ -1035,6 +1060,7 @@ func handleExportAccounts(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	poolMu.Unlock()
 
 	setAdminSecurityHeaders(w)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1649,6 +1675,9 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	p := loadPool()
 	active, cooldown, expired := 0, 0, 0
 	var usageCount, promptTokens, completionTokens, totalTokens, cachedTokens int64
+	// P5-9：账号字段读收进 poolMu 快照（与选择器/用量自增的锁内写并发时，
+	// 无锁遍历是数据竞争）；组装仍在锁外
+	poolMu.Lock()
 	for _, a := range p.Accounts {
 		usageCount += a.UsageCount
 		promptTokens += a.PromptTokens
@@ -1664,11 +1693,13 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			expired++
 		}
 	}
+	total := len(p.Accounts)
+	poolMu.Unlock()
 
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: true,
 		Data: map[string]any{
-			"total":            len(p.Accounts),
+			"total":            total,
 			"active":           active,
 			"cooldown":         cooldown,
 			"expired":          expired,

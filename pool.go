@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -557,6 +558,28 @@ func ensureAccountToken(acc *Account) (string, error) {
 	token = acc.AccessToken
 	poolMu.Unlock()
 	return token, nil
+}
+
+// snapshotPoolKeys 锁内拷贝 API 密钥列表（P5-9）：请求热路径与管理端并发
+// 增删键时，无锁遍历 p.Keys 是数据竞争；恒时比较在快照上进行，语义不变。
+func snapshotPoolKeys() []string {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	keys := make([]string, len(p.Keys))
+	copy(keys, p.Keys)
+	return keys
+}
+
+// apiKeyValid 恒定时间比较且不提前结束，避免按命中时长泄漏 key 前缀（P2-3）。
+func apiKeyValid(key string, keys []string) bool {
+	valid := false
+	for _, k := range keys {
+		if subtle.ConstantTimeCompare([]byte(k), []byte(key)) == 1 {
+			valid = true
+		}
+	}
+	return valid
 }
 
 func listAccounts() []*Account {

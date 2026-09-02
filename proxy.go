@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -344,8 +343,10 @@ func startProxy(host string, port int) error {
 	apiKeyHandler := func(next http.HandlerFunc) http.HandlerFunc {
 		return corsHandler(func(w http.ResponseWriter, r *http.Request) {
 			// Allow requests without key if no keys configured
-			p := loadPool()
-			if len(p.Keys) == 0 {
+			// P5-9：锁内快照 Keys（与管理端并发增删键时无锁遍历是数据竞争）；
+			// 恒时比较逐键全量、不提前结束的语义不变（P2-3）
+			keys := snapshotPoolKeys()
+			if len(keys) == 0 {
 				next(w, r)
 				return
 			}
@@ -357,15 +358,7 @@ func startProxy(host string, port int) error {
 				}
 			}
 
-			valid := false
-			for _, k := range p.Keys {
-				// 恒定时间比较且不提前结束，避免按命中时长泄漏 key 前缀（P2-3）
-				if subtle.ConstantTimeCompare([]byte(k), []byte(key)) == 1 {
-					valid = true
-				}
-			}
-
-			if !valid {
+			if !apiKeyValid(key, keys) {
 				writeJSON(w, http.StatusUnauthorized, map[string]any{
 					"error": map[string]string{
 						"message": "invalid API key. Generate one at /admin/ or set x-api-key header",

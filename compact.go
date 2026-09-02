@@ -339,7 +339,9 @@ func maybeCompact(ctx context.Context, params map[string]any, zm Model, sessionI
 		output = buffer
 	}
 	threshold := context - output
-	if estimateJSON(params) <= threshold {
+	// P5-9：estimateJSON 单次计算两处复用（:387 日志与 :342 门槛之间 params 不变）
+	est := estimateJSON(params)
+	if est <= threshold {
 		return compactOutcome{}
 	}
 
@@ -384,7 +386,7 @@ func maybeCompact(ctx context.Context, params map[string]any, zm Model, sessionI
 		summaryModel = zm.ID
 	}
 	log.Printf("  compact: model=%s ctx=%d est=%d threshold=%d keep=%d split@%d/%d summary_model=%s",
-		zm.ID, context, estimateJSON(params), threshold, keep, sel.split, len(messages), summaryModel)
+		zm.ID, context, est, threshold, keep, sel.split, len(messages), summaryModel)
 	summary, err := generateSummary(ctx, summaryModel, prompt, maxSum)
 	if err != nil {
 		log.Printf("  compact: summary generation failed (%v), falling back to truncation", err)
@@ -411,20 +413,24 @@ func maybeCompact(ctx context.Context, params map[string]any, zm Model, sessionI
 	}
 }
 
+// loadCompactState 返回会话压缩状态；未知会话返回共享的空态但**不再插入**
+// （P5-9：sessionID 源自客户端可控头，此前每个未知会话都会插入空态——
+// 请求在压缩门槛前返回或摘要被放弃时该条目成为无人回收的占位；真正有
+// 压缩产出的会话由 updateCompactState 建档，读取语义不变）。
 func loadCompactState(sessionID string) *compactState {
 	if sessionID == "" {
 		return &compactState{}
 	}
 	compactStatesMu.Lock()
 	defer compactStatesMu.Unlock()
-	st := compactStates[sessionID]
-	if st != nil {
+	if st, ok := compactStates[sessionID]; ok {
 		return st
 	}
-	st = &compactState{}
-	compactStates[sessionID] = st
-	return st
+	return &compactState{}
 }
+
+// compactStatesMax 会话压缩状态上限（P5-9）：超限按 updated 最早逐出。
+const compactStatesMax = 512
 
 func updateCompactState(sessionID, summary, recent string) {
 	if sessionID == "" {
@@ -433,6 +439,21 @@ func updateCompactState(sessionID, summary, recent string) {
 	compactStatesMu.Lock()
 	defer compactStatesMu.Unlock()
 	compactStates[sessionID] = &compactState{summary: summary, recent: recent, updated: time.Now()}
+	if len(compactStates) <= compactStatesMax {
+		return
+	}
+	type sessionUpdated struct {
+		id      string
+		updated time.Time
+	}
+	all := make([]sessionUpdated, 0, len(compactStates))
+	for k, v := range compactStates {
+		all = append(all, sessionUpdated{k, v.updated})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].updated.Before(all[j].updated) })
+	for i := 0; i < len(all)-compactStatesMax; i++ {
+		delete(compactStates, all[i].id)
+	}
 }
 
 // findExistingSummary 从已有消息中寻找客户端带来的历史摘要。

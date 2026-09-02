@@ -755,6 +755,279 @@ func TestCooldownZenProxyFromCtx(t *testing.T) {
 	}
 }
 
+// ============ P5-9 无锁读收敛 + 有界化 ============
+
+// TestHandleAdminStatsConcurrentWithMutation：并发改账号状态/用量与 stats
+// 读取，-race 干净且响应形状不变（P5-9：账号字段读收进 poolMu 快照）。
+func TestHandleAdminStatsConcurrentWithMutation(t *testing.T) {
+	acc1, acc2 := freeTestAccounts()
+	withFreeTestEnv(t, acc1, acc2)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			poolMu.Lock()
+			if i%2 == 0 {
+				acc1.Status = "cooldown"
+			} else {
+				acc1.Status = "active"
+			}
+			acc1.UsageCount = int64(i)
+			poolMu.Unlock()
+		}
+	}()
+
+	for i := 0; i < 100; i++ {
+		rec := httptest.NewRecorder()
+		handleAdminStats(rec, httptest.NewRequest("GET", "/admin/api/stats", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("stats status = %d, want 200", rec.Code)
+		}
+		var resp struct {
+			Success bool `json:"success"`
+			Data    struct {
+				Total int `json:"total"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("stats body: %v", err)
+		}
+		if !resp.Success || resp.Data.Total != 2 {
+			t.Fatalf("stats = %+v, want success with total 2", resp)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// TestHandleExportAccountsConcurrentWithMutation：并发轮换 RefreshToken 与
+// 导出读取，-race 干净且导出恒完整（2 个 token）。
+func TestHandleExportAccountsConcurrentWithMutation(t *testing.T) {
+	acc1, acc2 := freeTestAccounts()
+	acc1.RefreshToken = "rt-1"
+	acc2.RefreshToken = "rt-2"
+	withFreeTestEnv(t, acc1, acc2)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			poolMu.Lock()
+			acc1.RefreshToken = fmt.Sprintf("rt-1-%d", i)
+			poolMu.Unlock()
+		}
+	}()
+
+	for i := 0; i < 100; i++ {
+		rec := httptest.NewRecorder()
+		handleExportAccounts(rec, httptest.NewRequest("POST", "/admin/api/accounts/export", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("export status = %d, want 200", rec.Code)
+		}
+		var body struct {
+			Tokens []struct {
+				RefreshToken string `json:"refreshToken"`
+			} `json:"tokens"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("export body: %v", err)
+		}
+		if len(body.Tokens) != 2 {
+			t.Fatalf("exported tokens = %d, want 2", len(body.Tokens))
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// TestAPIKeySnapshotConcurrentWithMutation：并发增删键与快照/恒时比较读取，
+// -race 干净（P5-9）；顺序路径断言快照语义正确。
+func TestAPIKeySnapshotConcurrentWithMutation(t *testing.T) {
+	first, second := freeTestAccounts()
+	withFreeTestEnv(t, first, second)
+	p := loadPool()
+	poolMu.Lock()
+	p.Keys = []string{"cline_a"}
+	poolMu.Unlock()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			poolMu.Lock()
+			p.Keys = []string{fmt.Sprintf("cline_k%d", i%3), "cline_a"}
+			poolMu.Unlock()
+		}
+	}()
+
+	for i := 0; i < 300; i++ {
+		keys := snapshotPoolKeys()
+		apiKeyValid("cline_k1", keys)
+		apiKeyValid("bogus", keys)
+	}
+	close(stop)
+	wg.Wait()
+
+	// 顺序语义：快照反映当前键集，恒时比较命中/未命中
+	poolMu.Lock()
+	p.Keys = []string{"cline_a", "cline_b"}
+	poolMu.Unlock()
+	keys := snapshotPoolKeys()
+	if len(keys) != 2 {
+		t.Fatalf("snapshot len = %d, want 2", len(keys))
+	}
+	if !apiKeyValid("cline_b", keys) {
+		t.Fatal("apiKeyValid should match present key")
+	}
+	if apiKeyValid("cline_c", keys) {
+		t.Fatal("apiKeyValid should reject absent key")
+	}
+}
+
+// TestLoginAttemptsSweepBeyondCap：超硬上限（2×512）时按 lockedUntil 最早
+// 逐出，空置/过期项同时被清（P5-9：旧实现超限后永不清扫）。
+func TestLoginAttemptsSweepBeyondCap(t *testing.T) {
+	loginAttemptsMu.Lock()
+	old := loginAttempts
+	loginAttempts = make(map[string]*loginAttemptState)
+	loginAttemptsMu.Unlock()
+	t.Cleanup(func() {
+		loginAttemptsMu.Lock()
+		loginAttempts = old
+		loginAttemptsMu.Unlock()
+	})
+
+	now := time.Now()
+	loginAttemptsMu.Lock()
+	// 超硬上限 +2 的锁定项：lockedUntil 随 i 递增
+	for i := 0; i < 2*loginLockoutSweepMax+2; i++ {
+		loginAttempts[fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256)] = &loginAttemptState{
+			fails:       loginMaxConsecutiveFails,
+			lockedUntil: now.Add(time.Duration(i) * time.Minute),
+		}
+	}
+	// 空置项（无锁定、无连败）与过期锁定项：清扫应删除
+	loginAttempts["idle-clean"] = &loginAttemptState{}
+	loginAttempts["expired-lock"] = &loginAttemptState{fails: 3, lockedUntil: now.Add(-time.Minute)}
+	sweepLoginAttemptsLocked(now)
+	got := len(loginAttempts)
+	_, earliestGone := loginAttempts["10.0.0.0"]
+	latestKey := fmt.Sprintf("10.%d.%d.%d", (2*loginLockoutSweepMax+1)/65536, ((2*loginLockoutSweepMax+1)/256)%256, (2*loginLockoutSweepMax+1)%256)
+	_, latestKept := loginAttempts[latestKey]
+	loginAttemptsMu.Unlock()
+
+	if got != 2*loginLockoutSweepMax {
+		t.Fatalf("len after sweep = %d, want hard cap %d", got, 2*loginLockoutSweepMax)
+	}
+	if _, still := loginAttempts["idle-clean"]; still {
+		t.Fatal("idle (zero-fail, unlocked) entry should have been swept")
+	}
+	if _, still := loginAttempts["expired-lock"]; still {
+		t.Fatal("expired locked entry should have been swept")
+	}
+	if earliestGone {
+		t.Fatal("earliest lockedUntil entry should have been evicted")
+	}
+	if !latestKept {
+		t.Fatal("latest locked entry should be kept")
+	}
+}
+
+// TestLoadCompactStateDoesNotInsert：未知会话读取不得插入空态占位
+// （sessionID 源自客户端可控头，插入会造成无人回收的内存占用）。
+func TestLoadCompactStateDoesNotInsert(t *testing.T) {
+	compactStatesMu.Lock()
+	oldStates := compactStates
+	compactStates = make(map[string]*compactState)
+	compactStatesMu.Unlock()
+	t.Cleanup(func() {
+		compactStatesMu.Lock()
+		compactStates = oldStates
+		compactStatesMu.Unlock()
+	})
+
+	st := loadCompactState("unknown-session")
+	if st == nil || st.summary != "" {
+		t.Fatal("unknown session should yield empty state")
+	}
+	compactStatesMu.Lock()
+	n := len(compactStates)
+	compactStatesMu.Unlock()
+	if n != 0 {
+		t.Fatalf("loadCompactState inserted %d entries, want 0", n)
+	}
+}
+
+// TestUpdateCompactStateCap：compactStates 超上限（512）按 updated 最早逐出，
+// 最新会话保留。
+func TestUpdateCompactStateCap(t *testing.T) {
+	compactStatesMu.Lock()
+	oldStates := compactStates
+	compactStates = make(map[string]*compactState)
+	compactStatesMu.Unlock()
+	t.Cleanup(func() {
+		compactStatesMu.Lock()
+		compactStates = oldStates
+		compactStatesMu.Unlock()
+	})
+
+	// 10 个「陈旧」会话（updated 回拨 1 小时，规避 Windows 时钟粒度平局），
+	// 再插满上限触发逐出——被逐出的应恰是陈旧会话
+	for i := 0; i < 10; i++ {
+		updateCompactState(fmt.Sprintf("old-%04d", i), "s", "r")
+	}
+	compactStatesMu.Lock()
+	for _, v := range compactStates {
+		v.updated = time.Now().Add(-time.Hour)
+	}
+	compactStatesMu.Unlock()
+	for i := 0; i < compactStatesMax; i++ {
+		updateCompactState(fmt.Sprintf("sess-%04d", i), "s", "r")
+	}
+	compactStatesMu.Lock()
+	n := len(compactStates)
+	anyOldKept := false
+	for i := 0; i < 10; i++ {
+		if _, ok := compactStates[fmt.Sprintf("old-%04d", i)]; ok {
+			anyOldKept = true
+		}
+	}
+	_, newestKept := compactStates[fmt.Sprintf("sess-%04d", compactStatesMax-1)]
+	compactStatesMu.Unlock()
+
+	if n != compactStatesMax {
+		t.Fatalf("len = %d, want cap %d", n, compactStatesMax)
+	}
+	if anyOldKept {
+		t.Fatal("backdated (oldest) sessions should be evicted")
+	}
+	if !newestKept {
+		t.Fatal("newest session should be kept")
+	}
+}
+
 // ============ P5-8 setZenConfig 持锁落盘 + refresher 单例补启 ============
 
 // TestSetZenConfigConcurrentWritesValidFile：16 goroutine 并发 setZenConfig，

@@ -246,7 +246,11 @@ func getModelSyncResult() modelSyncResult {
 // startModelSync 在服务启动时异步同步一次（不阻塞启动）。
 func startModelSync() {
 	safeGo("model-sync", func() {
-		if !modelSyncRan {
+		// P5-9：modelSyncRan 读收进 modelSyncMu（与 syncClineModels 的锁内写并发）
+		modelSyncMu.Lock()
+		ran := modelSyncRan
+		modelSyncMu.Unlock()
+		if !ran {
 			syncClineModels()
 		}
 	})
