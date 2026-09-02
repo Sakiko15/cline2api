@@ -184,3 +184,48 @@ func TestAnthropicStreamMessageStartAndDeltaUsage(t *testing.T) {
 		t.Fatalf("message_delta.usage = %v, want input=12/output=7", u)
 	}
 }
+
+// ---- P4-2：user 轮 text 与 tool_result 并存时保留文本 ----
+
+func TestAnthropicToOpenAIUserTextWithToolResult(t *testing.T) {
+	req := anthropicReq{Model: "m", MaxTokens: 100}
+	req.Messages = []anthropicMsg{{
+		Role: "user",
+		Content: []any{
+			map[string]any{"type": "tool_result", "tool_use_id": "call_1", "content": "result data"},
+			map[string]any{"type": "text", "text": "fix the bug based on this"},
+		},
+	}}
+	out := anthropicToOpenAI(req)
+	msgs := out["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("want [tool, user(text)], got %d: %v", len(msgs), msgs)
+	}
+	tool, _ := msgs[0].(map[string]any)
+	if tool["role"] != "tool" || tool["tool_call_id"] != "call_1" {
+		t.Fatalf("first message should be tool result: %v", tool)
+	}
+	user, _ := msgs[1].(map[string]any)
+	if user["role"] != "user" || user["content"] != "fix the bug based on this" {
+		t.Fatalf("second message should carry user text: %v", user)
+	}
+}
+
+// 纯 tool_result 轮（无 text 块）不得追加空 user 消息（守护 p1_fixes_test:139）
+func TestAnthropicToOpenAIToolResultOnlyNoTrailingUser(t *testing.T) {
+	req := anthropicReq{Model: "m", MaxTokens: 100}
+	req.Messages = []anthropicMsg{{
+		Role: "user",
+		Content: []any{
+			map[string]any{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"},
+		},
+	}}
+	out := anthropicToOpenAI(req)
+	msgs := out["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("want exactly 1 tool message, got %d: %v", len(msgs), msgs)
+	}
+	if m := msgs[0].(map[string]any); m["role"] != "tool" {
+		t.Fatalf("message should be tool role: %v", m)
+	}
+}

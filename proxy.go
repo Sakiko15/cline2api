@@ -1725,6 +1725,11 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 				msgs = append(msgs, msg)
 			} else if m.Role == "user" && len(toolResults) > 0 {
 				msgs = append(msgs, toolResults...)
+				// user 轮 text 与 tool_result 并存：Anthropic 允许混合轮，纯丢弃文本
+				// 会丢失用户附带指令（P4-2）；textParts 为空时不追加空 user 消息
+				if len(textParts) > 0 {
+					msgs = append(msgs, map[string]any{"role": "user", "content": strings.Join(textParts, "\n")})
+				}
 			} else {
 				content := strings.Join(textParts, "\n")
 				msgs = append(msgs, map[string]any{"role": m.Role, "content": content})
