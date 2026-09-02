@@ -20,6 +20,9 @@ func TestMain(m *testing.M) {
 	oldPoolPath, oldLogsPath := poolPath, requestLogsPath
 	poolPath = filepath.Join(tmp, ".cline-accounts.json")
 	requestLogsPath = filepath.Join(tmp, ".cline-request-logs.json")
+	// 关闭启动随机密码生成：协议测试拉起完整代理（startProxy）时不应向
+	// 共享临时池文件写入哈希（跨测试耦合 + KDF 耗时 + 日志噪音）
+	adminAutoPassword = false
 
 	poolMu.Lock()
 	pool = nil // 强制从临时路径重新加载

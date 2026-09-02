@@ -419,6 +419,43 @@ func setAdminPassword(password string) error {
 	return nil
 }
 
+// adminAutoPassword 是否允许启动时自动生成随机管理密码（测试 seam：TestMain
+// 关闭，避免协议测试拉起完整代理时向共享临时池文件写入哈希造成跨测试耦合）。
+var adminAutoPassword = true
+
+// bootstrapAdminPassword 启动时的一次性管理密码引导（startProxy 在注册管理
+// 路由前调用）。优先级：既有哈希 > CLINE_ADMIN_PASSWORD > 随机生成。
+// 随机密码按 8-8-8-8 分组打印到日志（分组串即登录密码，128 位熵），仅生成
+// 时显示一次——落盘的是 PBKDF2 哈希，明文不可恢复。生成失败保持无密码态，
+// requireAdminAuth 的 fail-closed 分支继续拒绝非本机访问。
+func bootstrapAdminPassword() {
+	if loadPool().AdminPasswordHash != "" {
+		return
+	}
+	if envPwd := os.Getenv("CLINE_ADMIN_PASSWORD"); envPwd != "" {
+		if err := setAdminPassword(envPwd); err != nil {
+			log.Printf("admin password bootstrap failed: %v", err)
+		} else {
+			log.Printf("admin password bootstrapped from CLINE_ADMIN_PASSWORD environment variable")
+		}
+		return
+	}
+	if !adminAutoPassword {
+		return
+	}
+	raw, err := randomHex(16)
+	if err != nil {
+		log.Printf("admin password generation failed: %v (non-loopback admin access stays denied)", err)
+		return
+	}
+	grouped := strings.Join([]string{raw[0:8], raw[8:16], raw[16:24], raw[24:32]}, "-")
+	if err := setAdminPassword(grouped); err != nil {
+		log.Printf("admin password bootstrap failed: %v", err)
+		return
+	}
+	log.Printf("  admin panel initial password: %s (sign in at /admin/ and change it after first login)", grouped)
+}
+
 // verifyAdminPassword 校验后台密码（未设置密码时返回 false）。
 // 双格式兼容：PBKDF2 自包含格式或存量单轮 SHA-256（legacy）。
 // legacy 比较改用常量时间比较（P3-6）。KDF/哈希计算在 poolMu 外。

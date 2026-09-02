@@ -328,15 +328,10 @@ func startProxy(host string, port int) error {
 	}))
 
 	// Admin API (frontend + REST)
-	// CLINE_ADMIN_PASSWORD：未设密码时的一次性引导（配合管理面 fail-closed，
-	// 公网实例无需本机登录即可设置初始密码；已设密码的实例忽略该变量）
-	if envPwd := os.Getenv("CLINE_ADMIN_PASSWORD"); envPwd != "" && loadPool().AdminPasswordHash == "" {
-		if err := setAdminPassword(envPwd); err != nil {
-			log.Printf("admin password bootstrap failed: %v", err)
-		} else {
-			log.Printf("admin password bootstrapped from CLINE_ADMIN_PASSWORD environment variable")
-		}
-	}
+	// 管理密码一次性引导：既有哈希 > CLINE_ADMIN_PASSWORD 环境变量 > 随机
+	// 生成并打印到日志（配合管理面 fail-closed，公网实例无需本机登录即可
+	// 获得初始密码；已设密码的实例完全不受影响）
+	bootstrapAdminPassword()
 
 	registerAdminRoutes(mux)
 
