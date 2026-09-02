@@ -264,3 +264,13 @@ func finalizeRequestLog(entry *RequestLog, usage tokenUsage, firstOutputAt time.
 
 	appendRequestLog(*entry)
 }
+
+// markClineAttempt 标记 cline 上游并回填最后尝试的账号——成功与失败路径共用；
+// 此前错误分支在回填前就落日志，管理端失败行的账号列显示为空（v1.3.5）。
+func markClineAttempt(reqLog *RequestLog, acc *Account) {
+	reqLog.Upstream = upstreamCline
+	if acc != nil {
+		reqLog.AccountID = acc.AccountID
+		reqLog.AccountEmail = acc.Email
+	}
+}

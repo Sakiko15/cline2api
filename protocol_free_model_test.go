@@ -604,3 +604,119 @@ func TestOpenAIChatCompletionsFreeStreamDoesNotRetryAfterResponseStarts(t *testi
 		t.Fatalf("models = %q, want %q", got, want)
 	}
 }
+
+// TestRequestLogBackfillsAccountOnUpstreamFailure：cline 路径失败行也回填最后尝试的
+// 账号与上游标记——此前错误分支在回填前就落日志，管理端失败行的账号列显示为空
+// （v1.3.5）。模型名避开 zen 种子表，确保路由到 cline 账号池。
+func TestRequestLogBackfillsAccountOnUpstreamFailure(t *testing.T) {
+	oldPool := pool
+	oldConfig := getProxyConfig()
+	oldTransport := httpClient.Transport
+	oldAuthTransport := authClient.Transport
+	oldLogData, oldLogErr := os.ReadFile(requestLogsPath)
+	requestLogsMu.Lock()
+	oldLogs := requestLogs
+	requestLogs = nil
+	requestLogsMu.Unlock()
+	_ = os.Remove(requestLogsPath)
+	t.Cleanup(func() {
+		pool = oldPool
+		setProxyConfig(oldConfig)
+		httpClient.Transport = oldTransport
+		authClient.Transport = oldAuthTransport
+		requestLogsMu.Lock()
+		requestLogs = oldLogs
+		requestLogsMu.Unlock()
+		if oldLogErr != nil {
+			_ = os.Remove(requestLogsPath)
+		} else {
+			_ = os.WriteFile(requestLogsPath, oldLogData, 0600)
+		}
+	})
+
+	acc := &Account{
+		AccountID:   "logbackfill",
+		Email:       "logbackfill@example.com",
+		AccessToken: "logbackfill-token",
+		ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
+		Status:      "active",
+	}
+	pool = &AccountPool{Accounts: []*Account{acc}}
+	config := defaultProxyConfig()
+	config.Strategy = "fill"
+	setProxyConfig(config)
+
+	oldDelay := cline5xxRetryDelay
+	cline5xxRetryDelay = time.Millisecond
+	t.Cleanup(func() { cline5xxRetryDelay = oldDelay })
+
+	upstreamCalls := 0
+	httpClient.Transport = freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/api/v1/chat/completions" {
+			// 启动期模型同步等杂散请求：直接 404，不影响本用例
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}
+		upstreamCalls++
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"upstream boom"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
+	authClient.Transport = httpClient.Transport
+
+	baseURL := protocolTestServer(t)
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", strings.NewReader(`{"model":"test-not-zen-model","messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	client := &http.Client{Transport: &http.Transport{}, Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("send request: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("response status = %d, want 500: %s", resp.StatusCode, respBody)
+	}
+	if upstreamCalls == 0 {
+		t.Fatal("upstream was not called")
+	}
+
+	requestLogsMu.Lock()
+	if len(requestLogs) == 0 {
+		requestLogsMu.Unlock()
+		t.Fatal("no request log entry appended")
+	}
+	last := requestLogs[len(requestLogs)-1]
+	requestLogsMu.Unlock()
+
+	if last.AccountEmail != acc.Email {
+		t.Fatalf("failed entry account email = %q, want %q", last.AccountEmail, acc.Email)
+	}
+	if last.AccountID != acc.AccountID {
+		t.Fatalf("failed entry account id = %q, want %q", last.AccountID, acc.AccountID)
+	}
+	if last.Upstream != upstreamCline {
+		t.Fatalf("failed entry upstream = %q, want %q", last.Upstream, upstreamCline)
+	}
+	if last.Completed {
+		t.Fatal("failed entry must not be marked completed")
+	}
+	if last.Error == "" {
+		t.Fatal("failed entry error text is empty")
+	}
+	if last.Model != "test-not-zen-model" {
+		t.Fatalf("failed entry model = %q, want %q", last.Model, "test-not-zen-model")
+	}
+}

@@ -563,11 +563,11 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, chatToResponses(out2))
 
 	default: // cline
-		reqLog.Upstream = upstreamCline
 		upResp, acc, err := callClineAPI(r.Context(), chat, isStream)
 		if effectiveModel, ok := chat["model"].(string); ok && effectiveModel != "" {
 			reqLog.Model = effectiveModel
 		}
+		markClineAttempt(&reqLog, acc)
 		if err != nil {
 			log.Printf("  responses api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
@@ -575,10 +575,6 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer upResp.Body.Close()
-		if acc != nil {
-			reqLog.AccountID = acc.AccountID
-			reqLog.AccountEmail = acc.Email
-		}
 
 		if isStream {
 			w.Header().Set("Content-Type", "text/event-stream")

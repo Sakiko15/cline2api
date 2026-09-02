@@ -493,18 +493,14 @@ func startProxy(host string, port int) error {
 		if effectiveModel, ok := params["model"].(string); ok && effectiveModel != "" {
 			reqLog.Model = effectiveModel
 		}
+		markClineAttempt(&reqLog, acc)
 		if err != nil {
 			log.Printf("  api error: %v", err)
 			finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 			writeUpstreamError(w, err)
 			return
 		}
-		reqLog.Upstream = upstreamCline
 		defer resp.Body.Close()
-		if acc != nil {
-			reqLog.AccountID = acc.AccountID
-			reqLog.AccountEmail = acc.Email
-		}
 
 		if isStream {
 			handleStreamResponse(w, resp, acc, &reqLog)
@@ -819,12 +815,14 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool) (*htt
 	// 原先完全一致。
 	tried := make(map[*Account]struct{})
 	var lastErr error
+	var lastTried *Account
 	for acc != nil {
 		resp, used, err := callClineAPIWithAccount(ctx, acc, params, stream)
 		if err == nil {
 			return resp, used, nil
 		}
 		lastErr = err
+		lastTried = used
 		var apiErr *clineAPIError
 		if !errors.As(err, &apiErr) || apiErr.statusCode < 500 {
 			return nil, used, err
@@ -833,15 +831,17 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool) (*htt
 		log.Printf("  upstream %d from account %s, trying next account for model %s", apiErr.statusCode, sanitizeLog(truncateEmail(acc.Email), 64), model)
 		acc = pickAccountForModelStrictExcept(model, tried)
 	}
-	// 全部账号都 5xx：透传最后一个错误（状态码语义不变）
+	// 全部账号都 5xx：透传最后一个错误（状态码语义不变）；
+	// 同时返回最后尝试的账号，供请求日志失败行回填（v1.3.5）
 	if lastErr != nil {
 		log.Printf("  all %d tried accounts failed for model %s", len(tried), model)
 	}
-	return nil, nil, lastErr
+	return nil, lastTried, lastErr
 }
 
 func callFreeClineAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, *Account, error) {
 	var lastErr error
+	var lastTriedAcc *Account
 	for _, model := range freeModelChain {
 		params["model"] = model
 		// tried 按链内模型独立：429 冷却账号本就被资格集排除；非 429 的 4xx
@@ -851,7 +851,7 @@ func callFreeClineAPI(ctx context.Context, params map[string]any, stream bool) (
 			if err := ctx.Err(); err != nil {
 				// 客户端取消：立即终止，不做徒劳的账号遍历（P1-4 语义保持：
 				// 取消映射为账号不可用错误，不冷却账号）
-				return nil, nil, &clineAccountUnavailableError{err: fmt.Errorf("upstream request canceled: %w", err)}
+				return nil, lastTriedAcc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request canceled: %w", err)}
 			}
 			acc := pickAccountForModelStrictExcept(model, tried)
 			if acc == nil {
@@ -863,6 +863,7 @@ func callFreeClineAPI(ctx context.Context, params map[string]any, stream bool) (
 			if err == nil {
 				return resp, usedAcc, nil
 			}
+			lastTriedAcc = usedAcc
 			var accountErr *clineAccountUnavailableError
 			if errors.As(err, &accountErr) {
 				continue
@@ -884,7 +885,8 @@ func callFreeClineAPI(ctx context.Context, params map[string]any, stream bool) (
 		}
 	}
 	if lastErr != nil {
-		return nil, nil, lastErr
+		// 返回最后尝试的账号，供请求日志失败行回填（v1.3.5）
+		return nil, lastTriedAcc, lastErr
 	}
 	return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
 }
@@ -2136,18 +2138,14 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	if effectiveModel, ok := openAIReq["model"].(string); ok && effectiveModel != "" {
 		reqLog.Model = effectiveModel
 	}
+	markClineAttempt(&reqLog, acc)
 	if err != nil {
 		log.Printf("  anthropic api error: %v", err)
 		finalizeRequestLog(&reqLog, tokenUsage{}, time.Time{}, reqLog.StartedAt, false, err.Error())
 		writeUpstreamError(w, err)
 		return
 	}
-	reqLog.Upstream = upstreamCline
 	defer resp.Body.Close()
-	if acc != nil {
-		reqLog.AccountID = acc.AccountID
-		reqLog.AccountEmail = acc.Email
-	}
 
 	if req.Stream {
 		handleAnthropicStream(w, resp, acc, &reqLog)
