@@ -31,6 +31,10 @@ func setupClineWalkTest(t *testing.T, rt freeModelRoundTripper, accounts ...*Acc
 	setProxyConfig(cfg)
 	httpClient.Transport = rt
 	authClient.Transport = rt
+	// 5xx 重试等待调短，避免测试真实睡眠
+	oldDelay := cline5xxRetryDelay
+	cline5xxRetryDelay = time.Millisecond
+	t.Cleanup(func() { cline5xxRetryDelay = oldDelay })
 }
 
 func walkTestAccount(id, token string) *Account {
@@ -53,9 +57,8 @@ func fakeClineResp(req *http.Request, status int, body string) *http.Response {
 	}
 }
 
-// TestCallClineAPIWalksAccountsOnUpstream5xx：普通模型上游 5xx 时依序换账号重试，
-// 账号 A 返回 500、账号 B 返回 200 → 最终 200 且用到 B（修复前会直接透传 A 的 500，
-// 之后每次请求都命中同一账号的同一个 500）。
+// TestCallClineAPIWalksAccountsOnUpstream5xx：普通模型上游 5xx 时先同账号重试一次、
+// 仍 5xx 则换账号重试，账号 A 持续 500、账号 B 返回 200 → 最终 200 且用到 B。
 func TestCallClineAPIWalksAccountsOnUpstream5xx(t *testing.T) {
 	first := walkTestAccount("walk-a", "token-a")
 	second := walkTestAccount("walk-b", "token-b")
@@ -92,8 +95,72 @@ func TestCallClineAPIWalksAccountsOnUpstream5xx(t *testing.T) {
 	if acc != second {
 		t.Fatalf("served by account %v, want second account", acc)
 	}
-	if counts["a"] != 1 || counts["b"] != 1 {
-		t.Fatalf("upstream hits = %v, want a:1 b:1", counts)
+	// A 被同账号重试 2 次后换到 B（B 一次成功）
+	if counts["a"] != 2 || counts["b"] != 1 {
+		t.Fatalf("upstream hits = %v, want a:2 b:1", counts)
+	}
+}
+
+// TestCallClineAPIRetriesSameAccountOn5xx：上游 5xx 为按请求随机的暂态故障（实测），
+// 同账号 ~1s 后重试一次即可恢复——单账号池第一次 500、第二次 200 → 最终 200，
+// 上游共命中 2 次。
+func TestCallClineAPIRetriesSameAccountOn5xx(t *testing.T) {
+	only := walkTestAccount("walk-only", "token-only")
+	calls := 0
+	rt := freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return fakeClineResp(req, http.StatusInternalServerError, `{"error":"flaky gateway"}`), nil
+		}
+		return fakeClineResp(req, http.StatusOK, `{"id":"ok","choices":[]}`), nil
+	})
+	setupClineWalkTest(t, rt, only)
+
+	params := map[string]any{
+		"model":    "deepseek/deepseek-v4-flash",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	resp, _, err := callClineAPI(context.Background(), params, false)
+	if err != nil {
+		t.Fatalf("callClineAPI returned error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("final status = %d, want 200", resp.StatusCode)
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (one retry on same account)", calls)
+	}
+}
+
+// TestCallClineAPI5xxRetryBounded：同账号 5xx 重试至多一次，持续 500 的单账号池
+// 恰好命中上游 2 次后透传 clineAPIError{500}，不无限重试。
+func TestCallClineAPI5xxRetryBounded(t *testing.T) {
+	only := walkTestAccount("walk-only", "token-only")
+	calls := 0
+	rt := freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		calls++
+		return fakeClineResp(req, http.StatusInternalServerError, `{"error":"dead gateway"}`), nil
+	})
+	setupClineWalkTest(t, rt, only)
+
+	params := map[string]any{
+		"model":    "deepseek/deepseek-v4-flash",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	}
+	resp, _, err := callClineAPI(context.Background(), params, false)
+	if err == nil {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		t.Fatal("want error when upstream always 500, got nil")
+	}
+	var apiErr *clineAPIError
+	if !errors.As(err, &apiErr) || apiErr.statusCode != http.StatusInternalServerError {
+		t.Fatalf("err = %v, want clineAPIError{500}", err)
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (bounded retry)", calls)
 	}
 }
 
@@ -125,8 +192,9 @@ func TestCallClineAPIAllAccountsUpstream5xxPassthrough(t *testing.T) {
 	if upstreamErrorHTTPStatus(err) != http.StatusInternalServerError {
 		t.Fatalf("client status = %d, want 500", upstreamErrorHTTPStatus(err))
 	}
-	if calls != 2 {
-		t.Fatalf("upstream calls = %d, want 2 (one per account)", calls)
+	// 每账号同账号重试一次后换下一个：2 账号 × 2 次 = 4
+	if calls != 4 {
+		t.Fatalf("upstream calls = %d, want 4 (one 5xx retry per account)", calls)
 	}
 }
 

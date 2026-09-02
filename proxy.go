@@ -830,9 +830,13 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool) (*htt
 			return nil, used, err
 		}
 		tried[acc] = struct{}{}
+		log.Printf("  upstream %d from account %s, trying next account for model %s", apiErr.statusCode, sanitizeLog(truncateEmail(acc.Email), 64), model)
 		acc = pickAccountForModelStrictExcept(model, tried)
 	}
 	// 全部账号都 5xx：透传最后一个错误（状态码语义不变）
+	if lastErr != nil {
+		log.Printf("  all %d tried accounts failed for model %s", len(tried), model)
+	}
 	return nil, nil, lastErr
 }
 
@@ -885,6 +889,20 @@ func callFreeClineAPI(ctx context.Context, params map[string]any, stream bool) (
 	return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
 }
 
+// cline5xxRetryDelay 是 cline 上游 5xx 同账号重试前的等待（官方建议 ~1s；
+// 测试可调短）。包级 var 便于测试注入。
+var cline5xxRetryDelay = time.Second
+
+// sleepContext 睡眠 d；ctx 在此期间取消时返回 false。
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
 func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[string]any, stream bool) (*http.Response, *Account, error) {
 	token, err := ensureAccountToken(acc)
 	if err != nil {
@@ -900,13 +918,6 @@ func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[strin
 		return nil, acc, fmt.Errorf("marshal body: %w", err)
 	}
 
-	// 绑定请求上下文：客户端断开时上游请求随之取消（P1-4）
-	req, err := http.NewRequestWithContext(ctx, "POST", clineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
-	if err != nil {
-		return nil, acc, fmt.Errorf("create request: %w", err)
-	}
-	req.Header = clineHeaders(token, sessionID)
-
 	toolCount := 0
 	if tools, ok := params["tools"]; ok {
 		if t, ok := tools.([]any); ok {
@@ -916,51 +927,72 @@ func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[strin
 	log.Printf("  upstream: account=%s stream=%v tools=%d msgs=%d max_tokens=%v effort=%v",
 		sanitizeLog(truncateEmail(acc.Email), 64), stream, toolCount, getMsgCount(params), body["max_tokens"], body["reasoning_effort"])
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			// 客户端断开/请求取消不是账号问题，不得冷却账号，
-			// 否则 free 链会因一次用户取消把全池账号依次打入冷却（P1-4 回归修复）
-			return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request canceled: %w", err)}
+	// 请求循环：每次尝试都新建请求（body reader 不可复用）。两类各自至多一次的重试：
+	//   - 401：刷新令牌后重放（原有语义）；
+	//   - 5xx：官方文档明确为网关/供应商侧暂态错误，约 1s 后同账号重试一次
+	//     （实测上游按请求随机 500，换账号无效、重试才有效，v1.3.4）。
+	// 绑定请求上下文：客户端断开时上游请求随之取消（P1-4）。
+	refreshed := false
+	retried5xx := false
+	var resp *http.Response
+	for {
+		req, err := http.NewRequestWithContext(ctx, "POST", clineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
+		if err != nil {
+			return nil, acc, fmt.Errorf("create request: %w", err)
 		}
-		markAccountCooldown(acc, time.Now().Add(5*time.Minute))
-		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request: %w", err)}
-	}
+		req.Header = clineHeaders(token, sessionID)
 
-	if resp.StatusCode == 401 {
-		resp.Body.Close()
-		// Refresh token and retry
-		if err := refreshAccountToken(acc); err == nil {
-			token = acc.AccessToken
-			req.Header = clineHeaders(token, sessionID)
-			req.Body = io.NopCloser(bytes.NewReader(bodyJSON))
-			resp, err = httpClient.Do(req)
-			if err != nil {
-				if ctx.Err() != nil {
-					return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream retry canceled: %w", err)}
-				}
-				markAccountCooldown(acc, time.Now().Add(5*time.Minute))
-				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream retry: %w", err)}
+		resp, err = httpClient.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				// 客户端断开/请求取消不是账号问题，不得冷却账号，
+				// 否则 free 链会因一次用户取消把全池账号依次打入冷却（P1-4 回归修复）
+				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request canceled: %w", err)}
 			}
-			if resp.StatusCode == 401 {
-				resp.Body.Close()
+			markAccountCooldown(acc, time.Now().Add(5*time.Minute))
+			return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request: %w", err)}
+		}
+
+		if resp.StatusCode == 401 {
+			resp.Body.Close()
+			if refreshed {
 				markAccountExpired(acc)
 				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s token expired permanently", acc.Email)}
 			}
-		} else {
-			// 仅上游明确拒绝（4xx）才置 expired；暂态失败保持账号可用（P2-6）
-			var rej *tokenRefreshRejectedError
-			if errors.As(err, &rej) {
-				markAccountExpired(acc)
+			// Refresh token and retry once
+			if err := refreshAccountToken(acc); err != nil {
+				// 仅上游明确拒绝（4xx）才置 expired；暂态失败保持账号可用（P2-6）
+				var rej *tokenRefreshRejectedError
+				if errors.As(err, &rej) {
+					markAccountExpired(acc)
+				}
+				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s refresh failed: %w", acc.Email, err)}
 			}
-			return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s refresh failed: %w", acc.Email, err)}
+			token = acc.AccessToken
+			refreshed = true
+			continue
 		}
+
+		if resp.StatusCode >= 500 && !retried5xx {
+			retried5xx = true
+			io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+			resp.Body.Close()
+			log.Printf("  upstream %d from account %s, retrying once after %v", resp.StatusCode, sanitizeLog(truncateEmail(acc.Email), 64), cline5xxRetryDelay)
+			if !sleepContext(ctx, cline5xxRetryDelay) {
+				return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("upstream request canceled: %w", ctx.Err())}
+			}
+			continue
+		}
+		break
 	}
 
 	if resp.StatusCode != 200 {
 		bodyBytes := readAllLimited(resp.Body, 64<<10) // 错误体限额读取（P2-8）
 		resp.Body.Close()
 		bodyStr := string(bodyBytes)
+		// x-request-id 是 Cline 官方要求的报障凭据，落日志供用户报障（v1.3.4）
+		log.Printf("  upstream error: account=%s status=%d x-request-id=%s body=%s",
+			sanitizeLog(truncateEmail(acc.Email), 64), resp.StatusCode, resp.Header.Get("X-Request-Id"), sanitizeLog(truncate(bodyStr, 300), 300))
 		// 429：模型级冷却 —— 只暂停该模型，账号保持可用，其他模型继续转发
 		if resp.StatusCode == 429 {
 			model, _ := body["model"].(string)
