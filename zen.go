@@ -294,14 +294,23 @@ func setZenConfig(c *zenConfigData) {
 	}
 	zenConfigMu.Lock()
 	zenConfig = c
-	zenConfigMu.Unlock()
-
-	data, _ := json.MarshalIndent(c, "", "  ")
-	if err := writeFileAtomic(zenConfigPath, data, 0600); err != nil {
+	// P5-8：Marshal+落盘移入 zenConfigMu——writeFileAtomic 固定 tmp 路径，
+	// 并发 setZenConfig 的 tmp 写交错会产生撕裂配置文件（发现 H）。
+	// rebuild* 内部要取 zenConfigMu/getZenConfig，必须留在锁外。
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		log.Printf("zen config marshal failed: %v", err)
+	} else if err := writeFileAtomic(zenConfigPath, data, 0600); err != nil {
 		log.Printf("zen config save failed: %v", err)
 	}
+	zenConfigMu.Unlock()
+
 	rebuildZenTransport()
 	rebuildZenSem()
+	// P5-8：运行中启用 zen 时补启模型同步（sync.Once 幂等，重复调用无副作用）
+	if c.Enabled {
+		startZenModelsRefresher()
+	}
 }
 
 // cloneZenConfig 返回当前 zen 配置的深拷贝（Proxies 独立），供写时复制修改。
@@ -844,24 +853,36 @@ func syncZenModels() modelSyncResult {
 	return res
 }
 
-// startZenModelsRefresher 启动定时同步（10 分钟一次，不阻塞启动）。
+// zenRefresherOnce P5-8：refresher 全程单例。此前仅启动时（Enabled 时）拉起，
+// 运行中才启用 zen（管理端 setZenConfig）则模型列表永不同步；改为 setZenConfig
+// 在 Enabled 时也调用本函数，Once 保证幂等。禁用期 ticker 空转无害——每 tick
+// 自查 Enabled（下方）。zenRefresherStartDelay 抽为变量供测试注入。
+var (
+	zenRefresherOnce       sync.Once
+	zenRefresherStartDelay = 2 * time.Second
+)
+
+// startZenModelsRefresher 启动定时同步（10 分钟一次，不阻塞启动；sync.Once
+// 幂等，启动路径与运行中启用路径均安全）。
 func startZenModelsRefresher() {
-	safeGo("zen-models-refresher", func() {
-		time.Sleep(2 * time.Second) // 错开启动高峰
-		if cfg := getZenConfig(); cfg.Enabled {
-			guardTick("zen-models-refresher", func() {
-				setLastZenModelSync(syncZenModels())
-			})
-		}
-		ticker := time.NewTicker(zenModelSyncInterval)
-		defer ticker.Stop()
-		for range ticker.C {
+	zenRefresherOnce.Do(func() {
+		safeGo("zen-models-refresher", func() {
+			time.Sleep(zenRefresherStartDelay) // 错开启动高峰
 			if cfg := getZenConfig(); cfg.Enabled {
 				guardTick("zen-models-refresher", func() {
 					setLastZenModelSync(syncZenModels())
 				})
 			}
-		}
+			ticker := time.NewTicker(zenModelSyncInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				if cfg := getZenConfig(); cfg.Enabled {
+					guardTick("zen-models-refresher", func() {
+						setLastZenModelSync(syncZenModels())
+					})
+				}
+			}
+		})
 	})
 }
 

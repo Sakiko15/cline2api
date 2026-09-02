@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -751,6 +753,150 @@ func TestCooldownZenProxyFromCtx(t *testing.T) {
 	if zenProxyAvailable(0) {
 		t.Fatal("proxy[0] should be cooled with default duration when Retry-After absent")
 	}
+}
+
+// ============ P5-8 setZenConfig 持锁落盘 + refresher 单例补启 ============
+
+// TestSetZenConfigConcurrentWritesValidFile：16 goroutine 并发 setZenConfig，
+// 期间与结束后配置文件始终可完整解析（P5-8：Marshal+writeFileAtomic 移入
+// zenConfigMu 串行化——固定 tmp 路径并发写此前会交错撕裂）。
+func TestSetZenConfigConcurrentWritesValidFile(t *testing.T) {
+	withZenTestConfig(t, func(c *zenConfigData) { c.Retries = 1 })
+
+	stop := make(chan struct{})
+	var readerErr atomic.Value // string
+	var reads atomic.Int32
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			data, err := os.ReadFile(zenConfigPath)
+			if err != nil {
+				time.Sleep(time.Millisecond)
+				continue // 文件尚不存在属正常
+			}
+			var cfg zenConfigData
+			if err := json.Unmarshal(data, &cfg); err != nil {
+				readerErr.Store(err.Error())
+				return
+			}
+			reads.Add(1)
+			time.Sleep(2 * time.Millisecond) // Windows：让出句柄，避免与 rename 互斥碰撞
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				c := cloneZenConfig()
+				c.Retries = idx + 1
+				setZenConfig(c)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(stop)
+
+	if v, ok := readerErr.Load().(string); ok {
+		t.Fatalf("concurrent writes tore the config file: %s", v)
+	}
+	if reads.Load() == 0 {
+		t.Fatal("reader never observed a written config")
+	}
+	var finalCfg zenConfigData
+	data, err := os.ReadFile(zenConfigPath)
+	if err != nil {
+		t.Fatalf("final read: %v", err)
+	}
+	if err := json.Unmarshal(data, &finalCfg); err != nil {
+		t.Fatalf("final config unparseable: %v", err)
+	}
+	if finalCfg.Retries < 1 || finalCfg.Retries > 16 {
+		t.Fatalf("final Retries = %d, want one of the written values 1..16", finalCfg.Retries)
+	}
+}
+
+// TestSetZenConfigEnablesRefresherOnce：运行中启用 zen 触发模型同步，且
+// 多次 setZenConfig 只拉起一个 refresher（sync.Once 幂等——假 /models 端点
+// 仅应收到一次同步请求）。zenRefresherOnce 为进程级单例，本测试每进程仅
+// 有效运行一次（go test -count=1 即常规形态）。
+func TestSetZenConfigEnablesRefresherOnce(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"id":"p5-test-free-model"}]}`)
+	}))
+	defer srv.Close()
+
+	// 延迟注入必须先于 withZenTestConfig——后者 mutate Enabled=true 即拉起
+	// refresher（Once 触发点），注入晚了会与 goroutine 的读取构成数据竞争
+	oldDelay := zenRefresherStartDelay
+	zenRefresherStartDelay = 30 * time.Millisecond
+	t.Cleanup(func() { zenRefresherStartDelay = oldDelay })
+
+	withZenPoolSnapshot(t)
+	withZenTestConfig(t, func(c *zenConfigData) {
+		c.Enabled = true
+		c.BaseURL = srv.URL
+	})
+
+	// 连续三次启用配置：只应拉起一个 refresher
+	for i := 0; i < 3; i++ {
+		c := cloneZenConfig()
+		c.Enabled = true
+		setZenConfig(c)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && hits.Load() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond) // 给重复 refresher 留出触发窗口
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("models sync hits = %d, want exactly 1 (single refresher)", got)
+	}
+	p := loadPool()
+	poolMu.Lock()
+	found := false
+	for _, m := range p.Models {
+		if m.ID == "p5-test-free-model" {
+			found = true
+		}
+	}
+	poolMu.Unlock()
+	if !found {
+		t.Fatal("synced model missing from pool")
+	}
+}
+
+// withZenPoolSnapshot 保存/恢复 syncZenModels 会改写的池与全局状态
+// （zen 条目替换、DefaultModel 校验、remoteZenEnabled 置位）。
+func withZenPoolSnapshot(t *testing.T) {
+	t.Helper()
+	p := loadPool()
+	poolMu.Lock()
+	oldModels := p.Models
+	oldDefault := p.DefaultModel
+	poolMu.Unlock()
+	remoteZenEnabledMu.Lock()
+	oldRemote := remoteZenEnabled
+	remoteZenEnabledMu.Unlock()
+	t.Cleanup(func() {
+		poolMu.Lock()
+		p.Models = oldModels
+		p.DefaultModel = oldDefault
+		poolMu.Unlock()
+		remoteZenEnabledMu.Lock()
+		remoteZenEnabled = oldRemote
+		remoteZenEnabledMu.Unlock()
+	})
 }
 
 // ============ P5-6 CONNECT/TLS 握手死线 + socks5 死分支 ============
