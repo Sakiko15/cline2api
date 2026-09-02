@@ -46,7 +46,7 @@ touch .cline-accounts.json .cline-config.json .cline-zen.json
 - **名称**：`cline2api`
 - **来源**：编辑（使用 Web 编辑器定义服务）
 - **勾选**：强制拉取镜像（首次创建建议勾上）
-- 粘贴以下内容（与仓库 `docker-compose.yml` 的差别仅在于数据卷使用绝对路径）：
+- 粘贴以下内容（基于仓库 `docker-compose.yml`，数据卷改为绝对路径）：
 
 ```yaml
 services:

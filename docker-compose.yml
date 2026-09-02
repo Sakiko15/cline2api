@@ -1,29 +1,17 @@
-# 数据文件用单文件 bind mount：必须先在宿主机创建空文件，
-# 否则 Docker 会把不存在的路径自动创建成【目录】，导致容器内写入静默失败。
-# 注意：.cline-request-logs.json 由程序以 tmp+rename 原子写（request_logs.go），
-# 单文件挂载会 EBUSY 静默失效，故不挂载（日志留在容器内，重建后清空）。
+# 首次启动前必须先 touch 三个数据文件（见 docs/deploy-1panel.md 第 3 节）：
+# 否则 Docker 会把挂载路径建成目录，容器内写入静默失败。
 services:
   cline-proxy:
-    # 本地源码构建时取消下一行注释
-    # build: .
-    image: ghcr.io/sakiko15/cline2api:latest   # 固定版本示例: ghcr.io/sakiko15/cline2api:v1.3.0
-    pull_policy: always                        # 每次 up 都检查远端更新；离线环境可删除本行
+    image: ghcr.io/sakiko15/cline2api:latest
+    pull_policy: always
     container_name: cline-proxy
     restart: unless-stopped
     ports:
-      - "3457:3457"                # 公网直连（需放行防火墙/安全组）
-      # - "127.0.0.1:3457:3457"    # 仅本机 + 反向代理（更安全，二选一）
+      - "3457:3457"
     volumes:
       - ./.cline-accounts.json:/app/.cline-accounts.json
       - ./.cline-config.json:/app/.cline-config.json
       - ./.cline-zen.json:/app/.cline-zen.json
-      # 可选：System Prompt 覆盖文件（需先创建，否则同样会变成目录）
-      - ./override.md:/app/override.md:ro
-    # 管理后台密码：首次启动未设密码时自动生成随机初始密码并打印到容器日志
-    # （一次性，明文不重显）。如需固定密码可设置环境变量 CLINE_ADMIN_PASSWORD，
-    # 首次启动即以该值引导（已设密码的实例忽略此变量；改密码在后台进行）
-    # environment:
-    #   - CLINE_ADMIN_PASSWORD=change-me-first
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3457/health"]
       interval: 30s
