@@ -1050,12 +1050,20 @@ func startCooldownRecovery() {
 	})
 }
 
+// testAccountTimeout 探活请求上界（P5-3）：httpClient 无全局 Timeout，
+// 上游挂起曾使恢复循环串行卡死（30s ticker 停摆、恢复永久失效）。
+// 健康上游对 trivial 探活请求秒级返回；超时走取消路径不冷却账号。
+var testAccountTimeout = 30 * time.Second
+
 // testAccount sends a minimal "hi" request through a specific account to verify
 // it can complete an upstream call. It does not update aggregate token counters
 // or request logs; it is a diagnostic-only probe.
 func testAccount(acc *Account) accountTestResult {
 	result := accountTestResult{AccountID: acc.AccountID, Email: acc.Email}
 	started := time.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), testAccountTimeout)
+	defer cancel()
 
 	params := map[string]any{
 		"model":      getDefaultModel(),
@@ -1066,7 +1074,7 @@ func testAccount(acc *Account) accountTestResult {
 		},
 	}
 
-	resp, _, err := callClineAPIWithAccount(context.Background(), acc, params, false)
+	resp, _, err := callClineAPIWithAccount(ctx, acc, params, false)
 	if err != nil {
 		result.DurationMs = time.Since(started).Milliseconds()
 		result.Error = truncate(err.Error(), 200)

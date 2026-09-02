@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"strings"
 	"sync/atomic"
@@ -283,4 +284,72 @@ func TestCallClineAPIFreeFillAdvancesAfterTransientRefreshFailure(t *testing.T) 
 	}
 }
 
-// ============ P5-3 探活 30s 超时（下一提交回补） ============
+// ============ P5-3 探活 30s 超时 ============
+
+// hungTestAccountRoundTripper 模拟尊重取消但永不响应的挂起上游。
+func hungTestAccountRoundTripper() http.RoundTripper {
+	return freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+}
+
+// TestTestAccountTimesOutOnHungUpstream：上游挂起时探活在超时上界内返回失败，
+// 账号保持原状态（超时走取消路径不冷却），恢复循环不再被永久卡死。
+func TestTestAccountTimesOutOnHungUpstream(t *testing.T) {
+	first, _ := freeTestAccounts()
+	withFreeTestEnv(t, first)
+	httpClient.Transport = hungTestAccountRoundTripper()
+
+	old := testAccountTimeout
+	testAccountTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { testAccountTimeout = old })
+
+	done := make(chan accountTestResult, 1)
+	go func() { done <- testAccount(first) }()
+	select {
+	case result := <-done:
+		if result.OK {
+			t.Fatal("testAccount reported OK on hung upstream")
+		}
+		if !strings.Contains(result.Error, "canceled") {
+			t.Fatalf("error = %q, want cancel/deadline wording", result.Error)
+		}
+		if first.Status != "active" {
+			t.Fatalf("account status = %q, want unchanged active", first.Status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("testAccount did not return within 5s on hung upstream")
+	}
+}
+
+// TestAdminAccountTestHungUpstreamReturns：管理端 account-test 在挂起上游下
+// 正常拿到 200 与错误结果（旧实现会永久卡死 handler）。
+func TestAdminAccountTestHungUpstreamReturns(t *testing.T) {
+	first, _ := freeTestAccounts()
+	withFreeTestEnv(t, first)
+	httpClient.Transport = hungTestAccountRoundTripper()
+
+	old := testAccountTimeout
+	testAccountTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { testAccountTimeout = old })
+
+	req := httptest.NewRequest("POST", "/admin/api/accounts/test", strings.NewReader(`{"accountId":"free-one"}`))
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handleAdminAccountTest(rec, req)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleAdminAccountTest did not return within 5s on hung upstream")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"ok":false`) {
+		t.Fatalf("body = %s, want probe failure result", rec.Body.String())
+	}
+}
