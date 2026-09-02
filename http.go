@@ -147,5 +147,11 @@ func sanitizeLog(s string, max int) string {
 
 func runCommand(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// 本调用是 fire-and-forget（如 openBrowser）：后台 Wait 回收子进程句柄，
+	// 否则 cmd 句柄与子进程资源泄漏（P5-1）
+	go func() { _ = cmd.Wait() }()
+	return nil
 }

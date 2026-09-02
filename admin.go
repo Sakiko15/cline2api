@@ -762,7 +762,7 @@ func handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	oauthSessionsMu.Unlock()
 
 	// Start polling in background
-	go func() {
+	safeGo("oauth-poll", func() {
 		interval := device.Interval
 		if interval < 5 {
 			interval = 5
@@ -814,7 +814,7 @@ func handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		state.Email = email
 		oauthSessionsMu.Unlock()
 		log.Printf("OAuth account added: %s", sanitizeLog(truncateEmail(email), 64))
-	}()
+	})
 
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: true,
@@ -1475,11 +1475,11 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	if restarting {
 		// 异步重启监听（Shutdown 会等待当前请求完成，不能在 handler 内同步调用）
-		go func() {
+		safeGo("listener-restart", func() {
 			if err := restartListener(req.Host, listenPort); err != nil && err != http.ErrServerClosed {
 				log.Printf("Listener restart failed: %v", err)
 			}
-		}()
+		})
 	}
 
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{

@@ -985,50 +985,52 @@ func parseCooldownUntil(body string) time.Time {
 // 对 CooldownUntil 已过期的账号执行探活，成功则自动激活；
 // 并每 ~5 分钟低频探活 expired 账号（P2-6：刷新 token 仍有效的误标账号可自愈）。
 func startCooldownRecovery() {
-	go func() {
+	safeGo("cooldown-recovery", func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		tick := 0
 		for range ticker.C {
 			tick++
-			p := loadPool()
-			poolMu.Lock()
-			var toRecover []*Account
-			var toReactivate []*Account
-			for _, acc := range p.Accounts {
-				switch {
-				case acc.Status == "cooldown":
-					// 有恢复时间且已过期 → 探活
-					// 无恢复时间（旧数据）→ 也尝试探活
-					if acc.CooldownUntil.IsZero() || time.Now().After(acc.CooldownUntil) {
-						toRecover = append(toRecover, acc)
+			guardTick("cooldown-recovery", func() {
+				p := loadPool()
+				poolMu.Lock()
+				var toRecover []*Account
+				var toReactivate []*Account
+				for _, acc := range p.Accounts {
+					switch {
+					case acc.Status == "cooldown":
+						// 有恢复时间且已过期 → 探活
+						// 无恢复时间（旧数据）→ 也尝试探活
+						if acc.CooldownUntil.IsZero() || time.Now().After(acc.CooldownUntil) {
+							toRecover = append(toRecover, acc)
+						}
+					case acc.Status == "expired" && tick%10 == 0:
+						toReactivate = append(toReactivate, acc)
 					}
-				case acc.Status == "expired" && tick%10 == 0:
-					toReactivate = append(toReactivate, acc)
 				}
-			}
-			poolMu.Unlock()
+				poolMu.Unlock()
 
-			for _, acc := range toRecover {
-				log.Printf("cooldown recovery: testing %s", sanitizeLog(truncateEmail(acc.Email), 64))
-				result := testAccount(acc)
-				if result.OK {
-					log.Printf("cooldown recovery: %s reactivated", sanitizeLog(truncateEmail(acc.Email), 64))
-				} else {
-					log.Printf("cooldown recovery: %s still unavailable: %s", sanitizeLog(truncateEmail(acc.Email), 64), sanitizeLog(result.Error, 256))
+				for _, acc := range toRecover {
+					log.Printf("cooldown recovery: testing %s", sanitizeLog(truncateEmail(acc.Email), 64))
+					result := testAccount(acc)
+					if result.OK {
+						log.Printf("cooldown recovery: %s reactivated", sanitizeLog(truncateEmail(acc.Email), 64))
+					} else {
+						log.Printf("cooldown recovery: %s still unavailable: %s", sanitizeLog(truncateEmail(acc.Email), 64), sanitizeLog(result.Error, 256))
+					}
 				}
-			}
-			for _, acc := range toReactivate {
-				log.Printf("expired account probe: testing %s", sanitizeLog(truncateEmail(acc.Email), 64))
-				result := testAccount(acc)
-				if result.OK {
-					log.Printf("expired account probe: %s reactivated", sanitizeLog(truncateEmail(acc.Email), 64))
-				} else {
-					log.Printf("expired account probe: %s still unavailable: %s", sanitizeLog(truncateEmail(acc.Email), 64), sanitizeLog(result.Error, 256))
+				for _, acc := range toReactivate {
+					log.Printf("expired account probe: testing %s", sanitizeLog(truncateEmail(acc.Email), 64))
+					result := testAccount(acc)
+					if result.OK {
+						log.Printf("expired account probe: %s reactivated", sanitizeLog(truncateEmail(acc.Email), 64))
+					} else {
+						log.Printf("expired account probe: %s still unavailable: %s", sanitizeLog(truncateEmail(acc.Email), 64), sanitizeLog(result.Error, 256))
+					}
 				}
-			}
+			})
 		}
-	}()
+	})
 }
 
 // testAccount sends a minimal "hi" request through a specific account to verify
@@ -2131,7 +2133,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		close(done)
 		pingWG.Wait()
 	}()
-	go func() {
+	safeGo("anthropic-ping", func() {
 		defer pingWG.Done()
 		ticker := time.NewTicker(anthropicPingInterval)
 		defer ticker.Stop()
@@ -2143,7 +2145,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 				emit("ping", map[string]any{"type": "ping"})
 			}
 		}
-	}()
+	})
 
 	msgID := "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli())
 	stopReason := "end_turn"

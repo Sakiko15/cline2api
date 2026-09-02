@@ -847,19 +847,23 @@ func syncZenModels() modelSyncResult {
 
 // startZenModelsRefresher 启动定时同步（10 分钟一次，不阻塞启动）。
 func startZenModelsRefresher() {
-	go func() {
+	safeGo("zen-models-refresher", func() {
 		time.Sleep(2 * time.Second) // 错开启动高峰
 		if cfg := getZenConfig(); cfg.Enabled {
-			setLastZenModelSync(syncZenModels())
+			guardTick("zen-models-refresher", func() {
+				setLastZenModelSync(syncZenModels())
+			})
 		}
 		ticker := time.NewTicker(zenModelSyncInterval)
 		defer ticker.Stop()
 		for range ticker.C {
 			if cfg := getZenConfig(); cfg.Enabled {
-				setLastZenModelSync(syncZenModels())
+				guardTick("zen-models-refresher", func() {
+					setLastZenModelSync(syncZenModels())
+				})
 			}
 		}
-	}()
+	})
 }
 
 // ============ 最近一次同步结果（管理后台展示） ============

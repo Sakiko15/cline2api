@@ -71,26 +71,28 @@ var (
 
 // startCompactCleanup 定期清理 24 小时未更新的会话压缩状态。
 func startCompactCleanup() {
-	go func() {
+	safeGo("compact-cleanup", func() {
 		ticker := time.NewTicker(30 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
-			cutoff := time.Now().Add(-24 * time.Hour)
-			compactStatesMu.Lock()
-			for k, v := range compactStates {
-				if v.updated.Before(cutoff) {
-					delete(compactStates, k)
+			guardTick("compact-cleanup", func() {
+				cutoff := time.Now().Add(-24 * time.Hour)
+				compactStatesMu.Lock()
+				for k, v := range compactStates {
+					if v.updated.Before(cutoff) {
+						delete(compactStates, k)
+					}
 				}
-			}
-			compactStatesMu.Unlock()
+				compactStatesMu.Unlock()
 
-			// P3-14：内存态会话兜底清扫（懒清扫只在各自端点触发，遗漏路径靠这里兜底）
-			oauthSessionsMu.Lock()
-			evictExpiredOAuthSessionsLocked()
-			oauthSessionsMu.Unlock()
-			adminSweepExpiredSessions()
+				// P3-14：内存态会话兜底清扫（懒清扫只在各自端点触发，遗漏路径靠这里兜底）
+				oauthSessionsMu.Lock()
+				evictExpiredOAuthSessionsLocked()
+				oauthSessionsMu.Unlock()
+				adminSweepExpiredSessions()
+			})
 		}
-	}()
+	})
 }
 
 // adminSweepExpiredSessions 清扫过期的管理会话（requireAdminAuth 只懒删被访问的

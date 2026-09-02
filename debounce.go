@@ -1,6 +1,8 @@
 package main
 
 import (
+	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -51,7 +53,16 @@ func (d *debouncedFlush) fire() {
 	}
 	d.running = true
 	d.mu.Unlock()
-	d.fn()
+	// fn panic 只损失本次落盘（脏标记保留，下轮 schedule 重试）；
+	// running 复位与广播必须执行，否则 drain 永久阻塞（P5-1）
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("debounced flush panic: %v\n%s", r, debug.Stack())
+			}
+		}()
+		d.fn()
+	}()
 	d.mu.Lock()
 	d.running = false
 	d.cond.Broadcast()

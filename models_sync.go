@@ -245,11 +245,11 @@ func getModelSyncResult() modelSyncResult {
 
 // startModelSync 在服务启动时异步同步一次（不阻塞启动）。
 func startModelSync() {
-	go func() {
+	safeGo("model-sync", func() {
 		if !modelSyncRan {
 			syncClineModels()
 		}
-	}()
+	})
 }
 
 // remoteModelsActive 返回远程模型是否已启用（同步成功过）。
