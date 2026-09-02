@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -8,12 +9,15 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 // ============ P5-1 后台协程 panic 防护 ============
@@ -627,4 +631,134 @@ func TestEnsureAccountTokenSnapshotNoRace(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+}
+
+// ============ P5-6 CONNECT/TLS 握手死线 + socks5 死分支 ============
+
+// hungCONNECTProxy 只吞 CONNECT 请求、永不响应（模拟卡死的出口代理）。
+func hungCONNECTProxy(t *testing.T) net.Addr {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 4096)
+				for {
+					if _, err := c.Read(buf); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return ln.Addr()
+}
+
+// TestDialHTTPProxyConnectTimeout：代理收到 CONNECT 后挂起不响应，拨号必须
+// 在 zenConnectHandshakeTimeout 内失败（P5-6：此前 ReadResponse 无时限，
+// 卡死代理把 zenSem 槽位永久占死直至池耗尽）。
+func TestDialHTTPProxyConnectTimeout(t *testing.T) {
+	addr := hungCONNECTProxy(t)
+
+	old := zenConnectHandshakeTimeout
+	zenConnectHandshakeTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { zenConnectHandshakeTimeout = old })
+
+	u, err := url.Parse("http://" + addr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	conn, err := dialHTTPProxy(context.Background(), u, "tcp", "opencode.ai:443")
+	if err == nil {
+		conn.Close()
+		t.Fatal("expected timeout error from hung CONNECT proxy")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("dial returned after %v, want ~zenConnectHandshakeTimeout", elapsed)
+	}
+}
+
+// TestDialHTTPProxySuccessTunnelsAndClearsDeadline：CONNECT 200 后隧道可用，
+// 且超过握手死线窗口后仍能读写（证明 200 时死线已被清除——h2 长流不得残留）。
+func TestDialHTTPProxySuccessTunnelsAndClearsDeadline(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		br := bufio.NewReader(c)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if line == "\r\n" || line == "\n" {
+				break
+			}
+		}
+		if _, err := c.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+			return
+		}
+		buf := make([]byte, 256)
+		n, err := br.Read(buf)
+		if err != nil {
+			return
+		}
+		time.Sleep(400 * time.Millisecond) // 远超下方 300ms 握手死线
+		c.Write(buf[:n])
+	}()
+
+	old := zenConnectHandshakeTimeout
+	zenConnectHandshakeTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { zenConnectHandshakeTimeout = old })
+
+	u, err := url.Parse("http://" + ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialHTTPProxy(context.Background(), u, "tcp", "opencode.ai:443")
+	if err != nil {
+		t.Fatalf("dialHTTPProxy: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("tunnel write: %v", err)
+	}
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("tunnel echo past handshake deadline: %v (deadline not cleared?)", err)
+	}
+	if string(buf) != "ping" {
+		t.Fatalf("echo = %q, want ping", buf)
+	}
+}
+
+// TestSocks5DialerSupportsDialContext：编译期护栏——x/net 的 SOCKS5 拨号器
+// 必须恒实现 proxy.ContextDialer（P5-6 据此删除 dialViaProxy 的旧 goroutine
+// 包装死分支）；若上游行为变化导致该断言失败，须恢复兜底分支。
+func TestSocks5DialerSupportsDialContext(t *testing.T) {
+	d, err := proxy.SOCKS5("tcp", "127.0.0.1:1", &proxy.Auth{}, proxy.Direct)
+	if err != nil {
+		t.Fatalf("proxy.SOCKS5: %v", err)
+	}
+	if _, ok := d.(proxy.ContextDialer); !ok {
+		t.Fatal("proxy.SOCKS5 dialer no longer implements proxy.ContextDialer; removed legacy branch in dialViaProxy was reachable — restore fallback")
+	}
 }

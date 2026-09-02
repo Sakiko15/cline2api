@@ -33,6 +33,11 @@ var (
 	zenProxyCount  atomic.Uint64
 	zenTransportMu sync.Mutex
 
+	// P5-6：代理 CONNECT / TLS 握手窗口上界（可测注入）。此前 CONNECT 的
+	// ReadResponse 无任何时限，卡死代理会永久占用 zenSem 槽位直至池耗尽。
+	zenConnectHandshakeTimeout = 15 * time.Second
+	zenTLSHandshakeTimeout     = 15 * time.Second
+
 	zenProxyCooldowns   = map[int]time.Time{} // 代理索引 → 冷却截止
 	zenProxyCooldownsMu sync.Mutex
 )
@@ -78,7 +83,9 @@ func zenHTTP2Transport() *http2.Transport {
 				ServerName: host,
 				NextProtos: []string{"h2", "http/1.1"},
 			}, utls.HelloChrome_120)
-			if err := uconn.HandshakeContext(ctx); err != nil {
+			tlsCtx, cancel := context.WithTimeout(ctx, zenTLSHandshakeTimeout)
+			defer cancel()
+			if err := uconn.HandshakeContext(tlsCtx); err != nil {
 				raw.Close()
 				return nil, err
 			}
@@ -202,28 +209,14 @@ func dialViaProxy(ctx context.Context, raw, network, addr string) (net.Conn, err
 		if err != nil {
 			return nil, err
 		}
-		type ctxDialer interface {
-			DialContext(context.Context, string, string) (net.Conn, error)
+		// x/net 的 SOCKS5 拨号器（vendored internal/socks）恒实现 ContextDialer；
+		// 旧的「goroutine + select ctx.Done」包装在取消后泄漏 conn，属不可达死
+		// 代码，已删除（P5-6）。编译期护栏见 TestSocks5DialerSupportsDialContext。
+		cd, ok := d.(proxy.ContextDialer)
+		if !ok {
+			return nil, fmt.Errorf("socks5 dialer does not implement ContextDialer (unexpected)")
 		}
-		if cd, ok := d.(ctxDialer); ok {
-			return cd.DialContext(ctx, network, addr)
-		}
-		// 旧接口无 ctx：包装转换
-		type result struct {
-			c   net.Conn
-			err error
-		}
-		ch := make(chan result, 1)
-		go func() {
-			c, err := d.Dial(network, addr)
-			ch <- result{c, err}
-		}()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case r := <-ch:
-			return r.c, r.err
-		}
+		return cd.DialContext(ctx, network, addr)
 	default:
 		return nil, fmt.Errorf("unsupported proxy scheme %q", u.Scheme)
 	}
@@ -255,6 +248,10 @@ func dialHTTPProxy(ctx context.Context, u *url.URL, network, addr string) (net.C
 		cred := base64.StdEncoding.EncodeToString([]byte(u.User.String()))
 		req.Header.Set("Proxy-Authorization", "Basic "+cred)
 	}
+	// P5-6：CONNECT 握手窗口死线——此前 ReadResponse 无时限，卡死的代理会把
+	// zenSem 槽位永久占死直至池耗尽；读到 200 后立即清除（该 conn 后续承载
+	// h2 长流，不得残留死线）。
+	rawConn.SetDeadline(time.Now().Add(zenConnectHandshakeTimeout))
 	if err := req.Write(rawConn); err != nil {
 		rawConn.Close()
 		return nil, err
@@ -272,5 +269,6 @@ func dialHTTPProxy(ctx context.Context, u *url.URL, network, addr string) (net.C
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("proxy CONNECT %s: %s %s", u.Host, resp.Status, strings.TrimSpace(string(b)))
 	}
+	rawConn.SetDeadline(time.Time{})
 	return rawConn, nil
 }
