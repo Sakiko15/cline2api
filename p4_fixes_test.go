@@ -664,3 +664,67 @@ func TestBuildUpstreamBodyPassesThroughNewOpenAIFields(t *testing.T) {
 		}
 	}
 }
+
+// ---- P4-7：流式空闲 ping ----
+
+// slowReader 每次返回一个分片并延迟，模拟上游慢吐造成的空闲窗口
+type slowReader struct {
+	chunks []string
+	i      int
+	delay  time.Duration
+}
+
+func (s *slowReader) Read(p []byte) (int, error) {
+	if s.i >= len(s.chunks) {
+		return 0, io.EOF
+	}
+	time.Sleep(s.delay)
+	n := copy(p, s.chunks[s.i])
+	s.i++
+	return n, nil
+}
+
+func TestAnthropicStreamEmitsPing(t *testing.T) {
+	old := anthropicPingInterval
+	anthropicPingInterval = 20 * time.Millisecond
+	t.Cleanup(func() { anthropicPingInterval = old })
+
+	// 3 个分片各隔 60ms（≈3 个 ping 窗口），断言 ping 出现且生命周期事件完整
+	chunks := []string{
+		sseChunk(`{"choices":[{"delta":{"reasoning_content":"thinking..."}}]}`),
+		sseChunk(`{"choices":[{"delta":{"content":"answer"}}]}`),
+		sseChunk(`{"choices":[{"delta":{}},"finish_reason":"stop"]}`),
+		"data: [DONE]\n\n",
+	}
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(&slowReader{chunks: chunks, delay: 60 * time.Millisecond}),
+		Header:     make(http.Header),
+	}
+	rec := httptest.NewRecorder()
+	handleAnthropicStream(rec, upstream, nil, &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "m"})
+
+	events := parseSSEEvents(rec.Body.String())
+	pingCount := 0
+	hasStop, hasDelta := false, false
+	for _, e := range events {
+		switch e[0] {
+		case "ping":
+			pingCount++
+			var data map[string]any
+			if json.Unmarshal([]byte(e[1]), &data) != nil || data["type"] != "ping" {
+				t.Fatalf("ping payload wrong: %s", e[1])
+			}
+		case "message_delta":
+			hasDelta = true
+		case "message_stop":
+			hasStop = true
+		}
+	}
+	if pingCount == 0 {
+		t.Fatalf("expected at least 1 ping event, got 0 (events=%d)", len(events))
+	}
+	if !hasDelta || !hasStop {
+		t.Fatalf("stream lifecycle broken: hasDelta=%v hasStop=%v", hasDelta, hasStop)
+	}
+}

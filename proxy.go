@@ -1637,6 +1637,9 @@ var imageUnsupportedOnce sync.Once
 // reasoningDroppedOnce P4-5：工具块打开期间的推理分片丢弃只告警一次
 var reasoningDroppedOnce sync.Once
 
+// anthropicPingInterval 流式空闲 ping 间隔（P4-7）；var 便于测试收缩
+var anthropicPingInterval = 15 * time.Second
+
 // imageBlockToOpenAI 把 Anthropic image 块转成 OpenAI image_url part（P4-4）。
 // base64 → data URL；url source → 原样透传；其余/缺字段形态返回 false 由调用方告警。
 func imageBlockToOpenAI(block map[string]any) (map[string]any, bool) {
@@ -2091,8 +2094,12 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		return
 	}
 
+	// P4-7：emit 收进互斥——主循环与空闲 ping goroutine 并发写同一 ResponseWriter
+	var writeErrMu sync.Mutex
 	var writeErr error
 	emit := func(event string, data any) {
+		writeErrMu.Lock()
+		defer writeErrMu.Unlock()
 		if writeErr != nil {
 			return
 		}
@@ -2107,6 +2114,36 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		}
 		flusher.Flush()
 	}
+	writeFailed := func() bool {
+		writeErrMu.Lock()
+		defer writeErrMu.Unlock()
+		return writeErr != nil
+	}
+
+	// P4-7：空闲 ping。cline 上游长思考期可能 >60s 零字节，中间 LB 的默认空闲
+	// 超时会掐断连接；官方流式实现同样周期性发 ping 保活。goroutine 启动前先
+	// 注册 defer，覆盖所有提前 return 路径；handler 返回前等待 goroutine 退出，
+	// 杜绝 ResponseWriter 在 handler 返回后被写。
+	done := make(chan struct{})
+	var pingWG sync.WaitGroup
+	pingWG.Add(1)
+	defer func() {
+		close(done)
+		pingWG.Wait()
+	}()
+	go func() {
+		defer pingWG.Done()
+		ticker := time.NewTicker(anthropicPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				emit("ping", map[string]any{"type": "ping"})
+			}
+		}
+	}()
 
 	msgID := "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli())
 	stopReason := "end_turn"
@@ -2210,12 +2247,12 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	var firstOutputAt time.Time
 
 	for {
-		if writeErr != nil {
+		if writeFailed() {
 			break // 客户端已断开/停滞，停止读取上游（P1-4）
 		}
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			if err == io.EOF && line != "" && writeErr == nil {
+			if err == io.EOF && line != "" && !writeFailed() {
 				// 最后一个无换行的 SSE 行也要处理（与 OpenAI 透传路径一致）
 				if strings.HasPrefix(line, "data:") {
 					if payload := strings.TrimSpace(line[5:]); payload != "" && payload != "[DONE]" {
