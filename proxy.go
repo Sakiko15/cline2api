@@ -139,6 +139,10 @@ var (
 	serverMu      sync.Mutex
 )
 
+// restartMu 串行化 restartListener 全流程（P5-4）：并发两次重启会互相覆盖
+// currentServer/listenHost/listenPort；Serve 长驻不持锁，本锁仅在流程间互斥。
+var restartMu sync.Mutex
+
 // restartListener 用新地址重启 HTTP 监听。
 // 注意：必须在 goroutine 中调用——Shutdown 会等待当前 HTTP 请求完成，
 // 若在 admin handler 内同步调用会死锁。
@@ -147,6 +151,9 @@ func restartListener(host string, port int) error {
 		host = "127.0.0.1"
 	}
 	addr := fmt.Sprintf("%s:%d", host, port)
+
+	restartMu.Lock()
+	defer restartMu.Unlock()
 
 	serverMu.Lock()
 	old := currentServer
@@ -162,10 +169,15 @@ func restartListener(host string, port int) error {
 	}
 
 	// 先绑定新地址：目标端口被无关进程占用时 bind 失败直接返回，旧监听不受影响
-	// （P1-9：旧实现先 Shutdown 再 ListenAndServe，绑定失败会导致零监听、全代理下线）
+	// （P1-9：旧实现先 Shutdown 再 ListenAndServe，绑定失败会导致零监听、全代理下线）；
+	// P5-4：仅当失败地址就是旧监听自身（同址自占用；旧 Addr 为空是测试构造的
+	// 裸 Server）才停旧重试——换址冲突时停旧再失败会制造零监听下线。
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		// 同端口换地址等场景：端口仍被旧监听自身占用 → 停旧后重试。
+		sameAddr := old != nil && (old.Addr == addr || old.Addr == "")
+		if !sameAddr {
+			return fmt.Errorf("bind %s: %w", addr, err)
+		}
 		// Windows 上 Shutdown 关闭 listener 后 socket 释放是异步的，立即重绑
 		// 仍可能 EADDRINUSE，故带短暂退避重试数次。
 		shutdownOld()
@@ -185,9 +197,9 @@ func restartListener(host string, port int) error {
 	server := &http.Server{Addr: addr, Handler: serverMux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second}
 	serverMu.Lock()
 	currentServer = server
-	serverMu.Unlock()
 	listenHost = host
 	listenPort = port
+	serverMu.Unlock()
 
 	// 绑定成功后才停旧监听（若上一步未停）
 	shutdownOld()

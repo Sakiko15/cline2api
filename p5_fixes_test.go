@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -351,5 +354,117 @@ func TestAdminAccountTestHungUpstreamReturns(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"ok":false`) {
 		t.Fatalf("body = %s, want probe failure result", rec.Body.String())
+	}
+}
+
+// ============ P5-4 restartListener 同址判定与状态收锁 ============
+
+// TestRestartListenerDifferentAddrFailureKeepsOldListener：换址 bind 失败
+// （目标端口被无关进程占用）必须快速报错且不动旧监听——旧实现先停旧再重试
+// 500ms，失败后旧监听已关、全代理下线（零监听窗口）。
+func TestRestartListenerDifferentAddrFailureKeepsOldListener(t *testing.T) {
+	oldHost, oldPort := listenHost, listenPort
+	oldServer := currentServer
+	t.Cleanup(func() {
+		listenHost, listenPort = oldHost, oldPort
+		currentServer = oldServer
+	})
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	targetPort := occupied.Addr().(*net.TCPAddr).Port
+
+	// 旧监听：真实 Server 持有另一空闲端口（Addr 非空）
+	oldLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSrv := &http.Server{Addr: oldLn.Addr().String(), Handler: http.NewServeMux()}
+	go oldSrv.Serve(oldLn)
+	serverMu.Lock()
+	currentServer = oldSrv
+	serverMu.Unlock()
+	t.Cleanup(func() { oldSrv.Close() })
+
+	start := time.Now()
+	err = restartListener("127.0.0.1", targetPort)
+	if err == nil {
+		t.Fatal("restartListener should fail when target address is occupied by a foreign process")
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("failed after %v, want immediate error without shutdown-retry window", elapsed)
+	}
+	conn, err := net.DialTimeout("tcp", oldLn.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatalf("old listener died after failed restart on different addr: %v", err)
+	}
+	conn.Close()
+}
+
+// TestRestartListenerConcurrentConfigRead：admin 配置读取与重启并发，
+// listenHost/listenPort 收锁后 race detector 干净（-race 定向）。
+func TestRestartListenerConcurrentConfigRead(t *testing.T) {
+	oldHost, oldPort := listenHost, listenPort
+	oldServer := currentServer
+	oldMux := serverMux
+	t.Cleanup(func() {
+		listenHost, listenPort = oldHost, oldPort
+		serverMux = oldMux
+		if cu := currentServer; cu != nil && cu != oldServer {
+			cu.Close()
+		}
+		currentServer = oldServer
+	})
+	serverMux = http.NewServeMux()
+
+	// 探测空闲端口后释放，交由 restartListener 绑定
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	probe.Close()
+
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	readers.Add(1)
+	go func() {
+		defer readers.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				rec := httptest.NewRecorder()
+				handleAdminConfig(rec, httptest.NewRequest("GET", "/admin/api/config", nil))
+			}
+		}
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- restartListener("127.0.0.1", port) }()
+
+	serving := false
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			serving = true
+			break
+		}
+	}
+	close(stop)
+	readers.Wait()
+	if !serving {
+		t.Fatal("restartListener did not come up on free port")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("restartListener returned while serving: %v", err)
+	default:
 	}
 }

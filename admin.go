@@ -1356,9 +1356,12 @@ func handleAdminDeleteKey(w http.ResponseWriter, r *http.Request) {
 // GET /admin/api/config
 func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := getProxyConfig()
+	serverMu.Lock() // listenHost/listenPort 与 restartListener 的写入互斥（P5-4）
+	adminHost, adminPort := listenHost, listenPort
+	serverMu.Unlock()
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
-		"address":      fmt.Sprintf("%s:%d", effectiveAdminHost(listenHost), listenPort),
-		"host":         listenHost,
+		"address":      fmt.Sprintf("%s:%d", effectiveAdminHost(adminHost), adminPort),
+		"host":         adminHost,
 		"strategy":     cfg.Strategy,
 		"version":      appVersion,
 		"poolPath":     poolPath,
@@ -1474,20 +1477,26 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if restarting {
+		serverMu.Lock() // 快照当前端口，与 restartListener 的写入互斥（P5-4）
+		curPort := listenPort
+		serverMu.Unlock()
 		// 异步重启监听（Shutdown 会等待当前请求完成，不能在 handler 内同步调用）
 		safeGo("listener-restart", func() {
-			if err := restartListener(req.Host, listenPort); err != nil && err != http.ErrServerClosed {
+			if err := restartListener(req.Host, curPort); err != nil && err != http.ErrServerClosed {
 				log.Printf("Listener restart failed: %v", err)
 			}
 		})
 	}
 
+	serverMu.Lock()
+	respHost, respPort := listenHost, listenPort
+	serverMu.Unlock()
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
 		"strategy":      cfg.Strategy,
 		"headers":       cfg.Headers,
 		"defaultModel":  getDefaultModel(),
-		"host":          listenHost,
-		"address":       fmt.Sprintf("%s:%d", effectiveAdminHost(listenHost), listenPort),
+		"host":          respHost,
+		"address":       fmt.Sprintf("%s:%d", effectiveAdminHost(respHost), respPort),
 		"restarting":    restarting,
 	}})
 }
