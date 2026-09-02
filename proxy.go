@@ -285,6 +285,7 @@ type chatRequest struct {
 }
 
 func startProxy(host string, port int) error {
+	checkDataPathMountTraps()
 	p := loadPool()
 	loadRequestLogs()
 	activeCount := 0

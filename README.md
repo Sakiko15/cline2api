@@ -77,7 +77,7 @@ docker compose down        # 停止
 docker pull ghcr.io/sakiko15/cline2api:latest
 ```
 
-在 VPS 上推荐使用 1Panel 的 **容器 → 编排** 部署，完整步骤（含数据文件预创建、管理后台密码设置、升级与回滚）见 [docs/deploy-1panel.md](docs/deploy-1panel.md)。
+在 VPS 上推荐使用 1Panel 的 **容器 → 编排** 部署，完整步骤（含数据目录挂载、管理后台密码设置、升级与回滚）见 [docs/deploy-1panel.md](docs/deploy-1panel.md)。
 
 ## 使用指南
 

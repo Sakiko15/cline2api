@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,10 +28,25 @@ func init() {
 	poolPath = resolveDataPath(".cline-accounts.json")
 }
 
-// resolveDataPath 按优先级查找数据文件：exe 目录 → 工作目录 → 用户主目录。
-// 找到则用该路径（兼容旧版本在项目根目录存储的文件）；
-// 都找不到则回退到 exe 目录（首次运行会在该位置创建）。
+// dataDirOverride 返回 CLINE_DATA_DIR 环境变量指定的数据目录（trim 后非空才有效）。
+// 容器部署用它把整个数据目录作为一个 bind mount：单文件 bind mount 无法承载
+// tmp+rename 原子写（Linux 不允许 rename 覆盖挂载点，EBUSY），目录挂载无此限制，
+// 且宿主机目录不存在时 Docker 自动创建的类型恰好正确（零预创建文件）。
+func dataDirOverride() string {
+	return strings.TrimSpace(os.Getenv("CLINE_DATA_DIR"))
+}
+
+// resolveDataPath 按优先级查找数据文件：CLINE_DATA_DIR 目录 → exe 目录 →
+// 工作目录 → 用户主目录。找到则用该路径（兼容旧版本在各候选位置存储的文件）；
+// 都找不到则回退到 resolveDataDir()（环境变量目录优先，首次运行会在该位置创建）。
 func resolveDataPath(filename string) string {
+	// 0. CLINE_DATA_DIR 指定目录（容器部署整体挂载数据目录）
+	if dir := dataDirOverride(); dir != "" {
+		p := filepath.Join(dir, filename)
+		if fileExists(p) {
+			return p
+		}
+	}
 	// 1. exe 所在目录
 	if exe, err := os.Executable(); err == nil {
 		p := filepath.Join(filepath.Dir(exe), filename)
@@ -82,9 +98,10 @@ func probeDataDir(dir string) (string, bool) {
 	return dir, true
 }
 
-// resolveDataDir 启动时确定数据目录（结果缓存）：exe 目录 → cwd → ~/.cline2api
-// （允许创建），逐个探测可写性；全部不可写时告警并回退 exe 目录（P2-15）。
-// resolveDataPath 仅在三个候选路径都找不到既有文件时才会走到这里。
+// resolveDataDir 启动时确定数据目录（结果缓存）：CLINE_DATA_DIR 环境变量目录
+// （允许创建）→ exe 目录 → cwd → ~/.cline2api，逐个探测可写性；全部不可写时
+// 告警并回退 exe 目录（P2-15）。resolveDataPath 仅在所有候选路径都找不到既有
+// 文件时才会走到这里。
 var (
 	resolveDataDirOnce sync.Once
 	resolvedDataDir    string
@@ -92,6 +109,15 @@ var (
 
 func resolveDataDir() string {
 	resolveDataDirOnce.Do(func() {
+		// 环境变量目录最优先：Docker 部署整体挂载数据目录（容器内固定
+		// CLINE_DATA_DIR=/app/data，见 Dockerfile）。不可用则告警后走默认链。
+		if dir := dataDirOverride(); dir != "" {
+			if d, ok := probeDataDir(dir); ok {
+				resolvedDataDir = d
+				return
+			}
+			log.Printf("WARNING: CLINE_DATA_DIR=%s is not writable, falling back to default candidates", dir)
+		}
 		var candidates []string
 		if exe, err := os.Executable(); err == nil {
 			candidates = append(candidates, filepath.Dir(exe))
@@ -166,12 +192,57 @@ func savePool() {
 
 // writeFileAtomic 先写临时文件再 rename 替换，避免进程被杀/断电产生半截文件
 // （pool / credentials / proxy+zen config / request logs 共用，P2-14）。
+// rename 失败时降级保数据（单文件 bind mount 部署的 rename 会被内核以 EBUSY
+// 拒绝——挂载点不可被 rename 覆盖；目录陷阱则把路径建成目录）：
+//   - 目标为空目录 → 删除自愈后重试 rename（保持原子写）；
+//   - 目标为非空目录 → 报错并提示手动清理；
+//   - 其余（挂载点等）→ 原地写回同一 inode（放弃原子性，换取持久化生效）。
+var inplaceWriteWarned sync.Map // path -> struct{}{}，原地写告警每路径只打一次
+
+// osRenameFn 是 os.Rename 的包级 seam（互斥保护），供测试注入 rename 失败。
+var (
+	osRenameMu sync.Mutex
+	osRenameFn = os.Rename
+)
+
+func renameFile(oldpath, newpath string) error {
+	osRenameMu.Lock()
+	defer osRenameMu.Unlock()
+	return osRenameFn(oldpath, newpath)
+}
+
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, perm); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := renameFile(tmp, path); err == nil {
+		return nil
+	}
+	// rename 失败：先尝试目录陷阱自愈（Docker 把不存在的挂载路径建成空目录）
+	if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+		if entries, _ := os.ReadDir(path); len(entries) == 0 {
+			if rmErr := os.Remove(path); rmErr == nil {
+				log.Printf("removed empty directory blocking data file: %s", path)
+				if err := renameFile(tmp, path); err == nil {
+					return nil
+				}
+			}
+		} else {
+			os.Remove(tmp)
+			return fmt.Errorf("%s is a non-empty directory (Docker single-file mount trap); remove it on the host and switch to a directory mount (CLINE_DATA_DIR)", path)
+		}
+	}
+	// 原地写兜底：直接写回挂载点文件（同一 inode，内核允许），放弃原子性
+	if err := os.WriteFile(path, data, perm); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("atomic rename failed and in-place write failed: %w", err)
+	}
+	if _, dup := inplaceWriteWarned.LoadOrStore(path, struct{}{}); !dup {
+		log.Printf("atomic rename unavailable for %s (single-file bind mount?); falling back to in-place write", path)
+	}
+	os.Remove(tmp)
+	return nil
 }
 
 // quarantineFile 解析失败的数据文件改名隔离：否则默认值配置会在下一次保存时
@@ -181,6 +252,17 @@ func quarantineFile(path string, cause error) {
 		log.Printf("%s corrupt, quarantined as %s.bad: %v", path, path, cause)
 	} else {
 		log.Printf("%s parse failed (quarantine failed: %v): %v", path, renameErr, cause)
+	}
+}
+
+// checkDataPathMountTraps 启动时检测数据文件路径是否被 Docker 目录陷阱占用：
+// 单文件 bind mount 且宿主机文件未预创建时，Docker 会把挂载路径自动建成目录，
+// 此后所有落盘都会失败。给出可操作的修复提示，帮助老部署自诊。
+func checkDataPathMountTraps() {
+	for _, p := range []string{poolPath, requestLogsPath, zenConfigPath, proxyConfigFile} {
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			log.Printf("ERROR: data file path %s is a directory (Docker single-file bind-mount trap); remove the directory on the host and mount the parent directory via CLINE_DATA_DIR instead (see docs/deploy-1panel.md)", p)
+		}
 	}
 }
 

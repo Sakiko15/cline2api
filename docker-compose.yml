@@ -1,5 +1,6 @@
-# 首次启动前必须先 touch 三个数据文件（见 docs/deploy-1panel.md 第 3 节）：
-# 否则 Docker 会把挂载路径建成目录，容器内写入静默失败。
+# 数据目录整体挂载：无需预创建任何文件（目录不存在时 Docker 自动创建，
+# 类型恰好正确）。单文件 bind mount 无法承载 tmp+rename 原子写（EBUSY），
+# 故不再按文件挂载。数据目录由镜像内 ENV CLINE_DATA_DIR=/app/data 指定。
 services:
   cline-proxy:
     image: ghcr.io/sakiko15/cline2api:latest
@@ -9,9 +10,7 @@ services:
     ports:
       - "3457:3457"
     volumes:
-      - ./.cline-accounts.json:/app/.cline-accounts.json
-      - ./.cline-config.json:/app/.cline-config.json
-      - ./.cline-zen.json:/app/.cline-zen.json
+      - ./data:/app/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3457/health"]
       interval: 30s

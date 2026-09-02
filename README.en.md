@@ -76,7 +76,7 @@ No local build needed — pull the multi-arch image (linux/amd64, linux/arm64) f
 docker pull ghcr.io/sakiko15/cline2api:latest
 ```
 
-For VPS deployments, 1Panel's **Containers → Orchestration** is recommended. Full walkthrough (data-file pre-creation, admin password, upgrade & rollback): see [docs/deploy-1panel.md](docs/deploy-1panel.md).
+For VPS deployments, 1Panel's **Containers → Orchestration** is recommended. Full walkthrough (data directory mount, admin password, upgrade & rollback): see [docs/deploy-1panel.md](docs/deploy-1panel.md).
 
 ## Usage Guide
 

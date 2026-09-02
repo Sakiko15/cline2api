@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	workosClientID       = "client_01K3A541FN8TA3EPPHTD2325AR"
-	workosDeviceAuthURL  = "https://api.workos.com/user_management/authorize/device"
+	workosClientID        = "client_01K3A541FN8TA3EPPHTD2325AR"
+	workosDeviceAuthURL   = "https://api.workos.com/user_management/authorize/device"
 	workosAuthenticateURL = "https://api.workos.com/user_management/authenticate"
-	clineAPIBase         = "https://api.cline.bot/api/v1"
+	clineAPIBase          = "https://api.cline.bot/api/v1"
 )
 
 type credentials struct {
@@ -93,9 +93,11 @@ func findCredentialsFile() string {
 	return filepath.Join(pwd, ".cline-credentials.json")
 }
 
+// fileExists 仅当路径是常规文件（非目录）时返回 true：Docker 单文件 bind mount
+// 陷阱会把不存在的挂载路径建成目录，目录不能当数据文件用。
 func fileExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
 }
 
 func loadCredentials() *credentials {

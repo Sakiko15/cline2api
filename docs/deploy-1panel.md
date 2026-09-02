@@ -24,20 +24,26 @@
 
 网页验证包存在：`https://github.com/Sakiko15?tab=packages`
 
-## 3. 准备数据目录与文件（关键步骤，不可跳过）
+## 3. 数据目录（无需预创建文件）
 
-在 VPS 上执行：
+数据持久化采用**整体目录挂载**（镜像内已设 `CLINE_DATA_DIR=/app/data`）：
 
 ```bash
-mkdir -p /opt/cline2api && cd /opt/cline2api
-touch .cline-accounts.json .cline-config.json .cline-zen.json
+mkdir -p /opt/cline2api
 ```
 
-**为什么必须先创建空文件**：Docker 挂载时，如果宿主机上被挂载的文件路径不存在，Docker 会自动创建一个**同名目录**来挂载。容器内程序往"目录"写文件会**静默失败**（只在日志留一行错误），表现为：添加的账号、修改的配置、设置的管理密码在容器重建后全部丢失。
+目录不存在时 Docker 也会自动创建，**无需预创建任何文件**。历史版本"先 touch 三个数据文件"的做法已废弃：单文件 bind mount 无法承载程序的 tmp+rename 原子写（Linux 内核拒绝 rename 覆盖挂载点，报 EBUSY/`file exists`），这是旧版部署中账号、配置、密码不持久化的根因。
 
-也可以用 1Panel 的 文件 管理 → 定位到 `/opt/cline2api` → 新建这 3 个空文件。
+**从旧版单文件挂载升级**：删除 `/opt/cline2api/` 下由旧陷阱产生的同名**目录**（仅当它们是目录；真实文件会原地继续生效，无需移动）：
 
-如需 System Prompt 覆盖功能，再执行 `touch override.md` 并写入内容（可选）。
+```bash
+cd /opt/cline2api
+for f in .cline-accounts.json .cline-config.json .cline-zen.json; do
+  [ -d "$f" ] && rm -rf "$f" && echo "removed trap directory: $f"
+done
+```
+
+如需 System Prompt 覆盖功能，把 `override.md` 放在 `/opt/cline2api/` 下即可（可选）。
 
 ## 4. 创建编排
 
@@ -46,12 +52,12 @@ touch .cline-accounts.json .cline-config.json .cline-zen.json
 - **名称**：`cline2api`
 - **来源**：编辑（使用 Web 编辑器定义服务）
 - **勾选**：强制拉取镜像（首次创建建议勾上）
-- 粘贴以下内容（基于仓库 `docker-compose.yml`，数据卷改为绝对路径）：
+- 粘贴以下内容（与仓库 `docker-compose.yml` 的唯一差别是数据目录使用绝对路径）：
 
 ```yaml
 services:
   cline-proxy:
-    image: ghcr.io/sakiko15/cline2api:latest   # 固定版本示例: ghcr.io/sakiko15/cline2api:v1.3.0
+    image: ghcr.io/sakiko15/cline2api:latest   # 固定版本示例: ghcr.io/sakiko15/cline2api:v1.3.2
     pull_policy: always
     container_name: cline-proxy
     restart: unless-stopped
@@ -62,11 +68,7 @@ services:
       # 可选：固定管理密码（不设则首启自动生成随机密码并打印到容器日志，见第 6 节）
       - CLINE_ADMIN_PASSWORD=change-me-first
     volumes:
-      - /opt/cline2api/.cline-accounts.json:/app/.cline-accounts.json
-      - /opt/cline2api/.cline-config.json:/app/.cline-config.json
-      - /opt/cline2api/.cline-zen.json:/app/.cline-zen.json
-      # 可选：System Prompt 覆盖（需先创建文件）
-      # - /opt/cline2api/override.md:/app/override.md:ro
+      - /opt/cline2api:/app/data   # 数据目录整体挂载（账号/配置/请求日志都在此持久化）
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3457/health"]
       interval: 30s
@@ -79,7 +81,8 @@ services:
 
 - 不要写 `version:` 字段（Compose v2 已废弃，只会产生警告）
 - 1Panel 创建编排时会**自动预拉取镜像**，然后 `docker compose up -d`；创建过程可在任务日志中看到
-- `.cline-request-logs.json`（请求日志）**故意不挂载**：程序以 tmp+rename 原子写该文件，单文件 bind mount 会导致 rename 静默失败；日志保存在容器内，重建编排后清空（属预期行为）
+- `.cline-request-logs.json`（请求日志）随数据目录一并持久化（环形缓冲 5000 条 / 30 天，体积有界）
+- 不要再按单个文件挂载（如 `- /opt/cline2api/.cline-accounts.json:/app/.cline-accounts.json`）：内核不允许 rename 覆盖挂载点，程序的所有落盘都会失败
 
 ## 5. 首次启动验证
 
@@ -118,7 +121,7 @@ curl http://127.0.0.1:3457/health
 
 - 1Panel 容器列表中**重启** `cline-proxy`
 - 再次 `curl http://127.0.0.1:3457/health`，`activeAccounts` 应仍为账号数
-- 宿主机确认数据落盘：`cat /opt/cline2api/.cline-accounts.json`（含账号信息即正常）
+- 宿主机确认数据落盘：`cat /opt/cline2api/.cline-accounts.json`（含账号信息即正常）；请求日志 `.cline-request-logs.json` 也应出现在同一目录
 
 ## 9. 升级流程
 
