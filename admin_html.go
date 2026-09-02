@@ -623,6 +623,13 @@ textarea{resize:vertical;min-height:88px;font-family:ui-monospace,'SF Mono','Cas
             <option value="random">随机 (random)</option>
           </select>
         </div>
+        <div class="field">
+          <label>非流式转上游流式</label>
+          <select id="settingStreamAgg" onchange="updateConfig()">
+            <option value="on">开启（上游非流式 500 时自动绕行）</option>
+            <option value="off">关闭（始终非流式直连）</option>
+          </select>
+        </div>
         <div class="field"><label>引擎版本</label><input type="text" id="settingVersion" disabled></div>
       </div>
       <div class="form-row">
@@ -1122,6 +1129,9 @@ const I18N = {
   'opencode 出口代理': 'OpenCode Egress Proxies',
   '发往 opencode 的请求可经代理池轮询出口；命中限流时冷却当前出口并自动跳过。支持 http / https / socks5 / socks5h，每行一个，如 ': 'Requests to opencode can egress through a rotating proxy pool; the current proxy is cooled down and skipped on rate limits. Supports http / https / socks5 / socks5h, one per line, e.g. ',
   '代理策略': 'Proxy strategy',
+  '非流式转上游流式': 'Non-stream via upstream stream',
+  '开启（上游非流式 500 时自动绕行）': 'On (detour around upstream non-stream 500s)',
+  '关闭（始终非流式直连）': 'Off (always non-stream direct)',
   '出口冷却状态': 'Egress cooldowns',
   '代理列表': 'Proxy list',
   '无冷却': 'None cooling',
@@ -1730,8 +1740,9 @@ function copyText(t) {
 async function updateConfig() {
   const strategy = _('settingStrategy').value;
   const defaultModel = _('settingDefModel').value;
+  const forceUpstreamStream = _('settingStreamAgg') ? _('settingStreamAgg').value !== 'off' : undefined;
   try {
-    await api('POST', '/config/update', { strategy, defaultModel });
+    await api('POST', '/config/update', { strategy, defaultModel, forceUpstreamStream });
     toast(t('配置已更新'), 'success');
   } catch (e) { toast(t('更新失败: ') + e.message, 'error'); }
 }
@@ -2036,6 +2047,7 @@ async function loadConfig() {
     const c = d.data;
     if (c.address) _('settingAddr').value = c.address;
     if (c.strategy) _('settingStrategy').value = c.strategy;
+    if (c.forceUpstreamStream !== undefined && _('settingStreamAgg')) _('settingStreamAgg').value = c.forceUpstreamStream ? 'on' : 'off';
     if (c.version) _('settingVersion').value = c.version;
     if (c.version) {
       if (_('footerVersion')) _('footerVersion').textContent = c.version;

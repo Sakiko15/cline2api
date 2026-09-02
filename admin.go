@@ -1277,6 +1277,9 @@ var (
 type proxyConfigData struct {
 	Strategy string            `json:"strategy"`
 	Headers  map[string]string `json:"headers"`
+	// ForceUpstreamStream 非流式客户端请求是否改发上游流式再聚合（v1.3.6）。
+	// 指针语义：nil（旧配置文件无此键）= 默认开启；显式 false 才回退旧行为。
+	ForceUpstreamStream *bool `json:"forceUpstreamStream,omitempty"`
 }
 
 func defaultProxyConfig() *proxyConfigData {
@@ -1426,6 +1429,7 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		"address":      fmt.Sprintf("%s:%d", effectiveAdminHost(adminHost), adminPort),
 		"host":         adminHost,
 		"strategy":     cfg.Strategy,
+		"forceUpstreamStream": upstreamStreamForNonStream(cfg),
 		"version":      appVersion,
 		"poolPath":     poolPath,
 		"defaultModel": getDefaultModel(),
@@ -1450,10 +1454,11 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var req struct {
-		Strategy     string            `json:"strategy"`
-		Headers      map[string]string `json:"headers"`
-		DefaultModel string            `json:"defaultModel"`
-		Host         string            `json:"host"`
+		Strategy            string            `json:"strategy"`
+		Headers             map[string]string `json:"headers"`
+		DefaultModel        string            `json:"defaultModel"`
+		Host                string            `json:"host"`
+		ForceUpstreamStream *bool             `json:"forceUpstreamStream"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: tAPI(r, "invalid_json")})
@@ -1489,6 +1494,11 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		for k, v := range req.Headers {
 			cfg.Headers[k] = v
 		}
+		changed = true
+	}
+
+	if req.ForceUpstreamStream != nil {
+		cfg.ForceUpstreamStream = req.ForceUpstreamStream
 		changed = true
 	}
 

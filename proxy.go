@@ -912,7 +912,11 @@ func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[strin
 		return nil, acc, &clineAccountUnavailableError{err: fmt.Errorf("account %s token failed: %w", acc.Email, err)}
 	}
 
-	body := buildUpstreamBody(params, stream)
+	// 非流式客户端请求默认改发上游流式、代理侧聚合回 JSON（v1.3.6）：
+	// 上游网关的非流式 JSON 装配路径远比流式透传脆（实测同窗口非流式 0/5 vs
+	// 流式 5/5），重试只能概率性缓解；配置 forceUpstreamStream=false 可回退。
+	useUpstreamStream := stream || upstreamStreamForNonStream(getProxyConfig())
+	body := buildUpstreamBody(params, useUpstreamStream)
 	sessionID, _ := body["session_id"].(string)
 
 	bodyJSON, err := json.Marshal(body)
@@ -927,7 +931,7 @@ func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[strin
 		}
 	}
 	log.Printf("  upstream: account=%s stream=%v tools=%d msgs=%d max_tokens=%v effort=%v",
-		sanitizeLog(truncateEmail(acc.Email), 64), stream, toolCount, getMsgCount(params), body["max_tokens"], body["reasoning_effort"])
+		sanitizeLog(truncateEmail(acc.Email), 64), useUpstreamStream, toolCount, getMsgCount(params), body["max_tokens"], body["reasoning_effort"])
 
 	// 请求循环：每次尝试都新建请求（body reader 不可复用）。两类各自至多一次的重试：
 	//   - 401：刷新令牌后重放（原有语义）；
@@ -1009,6 +1013,16 @@ func callClineAPIWithAccount(ctx context.Context, acc *Account, params map[strin
 	}
 
 	markAccountUsed(acc)
+	if !stream && useUpstreamStream {
+		// 客户端要非流式但上游收到的请求是流式：聚合回标准 JSON（v1.3.6）。
+		// 聚合失败（流中 error 块 / 空流）以 ≥500 错误抛出，walk 换账号接力。
+		model, _ := body["model"].(string)
+		aggResp, aggErr := aggregateClineStreamToChat(resp, model)
+		if aggErr != nil {
+			return nil, acc, aggErr
+		}
+		return aggResp, acc, nil
+	}
 	return resp, acc, nil
 }
 
