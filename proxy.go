@@ -809,9 +809,31 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool) (*htt
 
 	acc := pickAccountForModel(model)
 	if acc == nil {
-		return nil, nil, fmt.Errorf("no active accounts available. Use --login or admin API to add accounts")
+		// 包装为账号不可用错误：客户端得到明确的 "no account available" 文案，
+		// 而非与真实上游故障无法区分的默认 500 文案
+		return nil, nil, &clineAccountUnavailableError{err: fmt.Errorf("no active accounts available. Use --login or admin API to add accounts")}
 	}
-	return callClineAPIWithAccount(ctx, acc, params, stream)
+	// 上游 5xx（服务端故障）依序换账号重试：tried 保证每账号至多试一次
+	// （仿 callFreeClineAPI 的 P5-2 模式，否则 fill/round_robin 策略会反复选中
+	// 同一账号）；4xx 不重试（账号级/请求级问题）；池仅一个账号时行为与
+	// 原先完全一致。
+	tried := make(map[*Account]struct{})
+	var lastErr error
+	for acc != nil {
+		resp, used, err := callClineAPIWithAccount(ctx, acc, params, stream)
+		if err == nil {
+			return resp, used, nil
+		}
+		lastErr = err
+		var apiErr *clineAPIError
+		if !errors.As(err, &apiErr) || apiErr.statusCode < 500 {
+			return nil, used, err
+		}
+		tried[acc] = struct{}{}
+		acc = pickAccountForModelStrictExcept(model, tried)
+	}
+	// 全部账号都 5xx：透传最后一个错误（状态码语义不变）
+	return nil, nil, lastErr
 }
 
 func callFreeClineAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, *Account, error) {
