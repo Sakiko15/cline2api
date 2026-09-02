@@ -95,12 +95,19 @@ func zenHTTP2Transport() *http2.Transport {
 }
 
 func zenDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	p, _ := pickZenProxy()
+	p, idx := pickZenProxy()
 	if p == "" {
 		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 		return d.DialContext(ctx, network, addr)
 	}
-	return dialViaProxy(ctx, p, network, addr)
+	conn, err := dialViaProxy(ctx, p, network, addr)
+	if err == nil {
+		// P5-7：实际经代理拨号成功时写回索引，供限流冷却归因（见 zenProxySlotKey）
+		if slot, ok := ctx.Value(zenProxySlotKey{}).(*int); ok && slot != nil {
+			*slot = idx
+		}
+	}
+	return conn, err
 }
 
 // pickZenProxy 按策略选代理，返回 (代理URL, 索引)；未配置返回 ("", -1)。
@@ -127,7 +134,8 @@ func pickZenProxy() (string, int) {
 	return cfg.Proxies[idx], idx
 }
 
-// lastZenProxyIdx 最近一次实际使用的代理索引（日志/冷却定位用）。
+// lastZenProxyIdx 最近一次实际使用的代理索引（仅日志展示兜底；
+// P5-7 起冷却归因改走 ctx 槽位，见 zenProxySlotKey）。
 func lastZenProxyIdx() int {
 	v := int64(zenProxyCount.Load())
 	if v <= 0 {
@@ -138,6 +146,32 @@ func lastZenProxyIdx() int {
 		n = 1
 	}
 	return int((v - 1) % int64(n))
+}
+
+// zenProxySlotKey P5-7：ctx 槽位键——callZenAPI 为每次尝试挂一个 *int（-1 起），
+// zenDialContext 实际经代理拨号成功时写回代理索引。限流冷却按该值归因：
+// 连接复用（未走拨号）时槽位保持 -1，不冷却——宁漏勿错杀健康代理。
+// 旧实现用共享轮询计数器取模推算，并发请求交错时错杀无关代理（发现 G）。
+type zenProxySlotKey struct{}
+
+// zenProxySlotFromCtx 读取请求上下文中的代理索引槽位；无槽位返回 nil。
+func zenProxySlotFromCtx(ctx context.Context) *int {
+	slot, _ := ctx.Value(zenProxySlotKey{}).(*int)
+	return slot
+}
+
+// cooldownZenProxyFromCtx 按槽位冷却本次实际拨号的出口代理
+// （Retry-After 优先，默认 10 分钟，钳制上限 maxProxyCooldown）。
+func cooldownZenProxyFromCtx(ctx context.Context, retryAfter time.Duration) {
+	slot := zenProxySlotFromCtx(ctx)
+	if slot == nil || *slot < 0 {
+		return
+	}
+	d := clampRetryWait(retryAfter, maxProxyCooldown)
+	if d <= 0 {
+		d = 10 * time.Minute
+	}
+	cooldownZenProxy(*slot, d)
 }
 
 func cooldownZenProxy(idx int, d time.Duration) {

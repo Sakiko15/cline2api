@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -633,6 +634,125 @@ func TestEnsureAccountTokenSnapshotNoRace(t *testing.T) {
 	wg.Wait()
 }
 
+// ============ P5-7 限流冷却按 ctx 槽归因 ============
+
+// withZenTestConfig 将 zen 配置与落盘路径重定向到临时目录（默认禁用 zen，
+// 防止 P5-8 引入的启用期同步被误触发），mutate 定制后原子替换。
+func withZenTestConfig(t *testing.T, mutate func(c *zenConfigData)) {
+	t.Helper()
+	oldPath, oldCfg := zenConfigPath, zenConfig
+	oldClient := getZenHTTPClient()
+	t.Cleanup(func() {
+		zenConfigPath, zenConfig = oldPath, oldCfg
+		zenTransportMu.Lock()
+		zenHTTPClient = oldClient
+		zenTransportMu.Unlock()
+	})
+	dir := t.TempDir()
+	zenConfigPath = filepath.Join(dir, ".cline-zen.json")
+	zenConfig = nil // 强制从临时路径惰性加载（不存在 → 默认值），不触碰真实配置
+	cfg := getZenConfig()
+	cfg.Enabled = false
+	mutate(cfg)
+	setZenConfig(cfg)
+}
+
+// clearZenProxyCooldownsForTest 清空代理冷却表（进入时与测试结束时各一次）。
+func clearZenProxyCooldownsForTest(t *testing.T) {
+	t.Helper()
+	clear := func() {
+		zenProxyCooldownsMu.Lock()
+		zenProxyCooldowns = map[int]time.Time{}
+		zenProxyCooldownsMu.Unlock()
+	}
+	clear()
+	t.Cleanup(clear)
+}
+
+// TestZenProxySlotHelpers：ctx 槽位的读写语义（无槽位 nil、指针共享可写回）。
+func TestZenProxySlotHelpers(t *testing.T) {
+	if slot := zenProxySlotFromCtx(context.Background()); slot != nil {
+		t.Fatalf("slot without WithValue = %v, want nil", slot)
+	}
+	v := -1
+	ctx := context.WithValue(context.Background(), zenProxySlotKey{}, &v)
+	got := zenProxySlotFromCtx(ctx)
+	if got == nil || *got != -1 {
+		t.Fatalf("slot = %v, want *int(-1)", got)
+	}
+	*got = 2
+	if got2 := zenProxySlotFromCtx(ctx); got2 == nil || *got2 != 2 {
+		t.Fatalf("slot after write = %v, want 2 (same pointer)", got2)
+	}
+}
+
+// TestZenDialContextWritesProxyIdx：两条目同址假代理 + round_robin，两次拨号
+// 分别写回索引 0/1（P5-7：实际拨号代理归因，替代共享计数器错算）。
+func TestZenDialContextWritesProxyIdx(t *testing.T) {
+	addr := okCONNECTProxy(t)
+	proxyURL := "http://" + addr.String()
+	withZenTestConfig(t, func(c *zenConfigData) {
+		c.Proxies = []string{proxyURL, proxyURL}
+		c.ProxyStrategy = "round_robin"
+	})
+
+	seen := map[int]bool{}
+	for i := 0; i < 2; i++ {
+		slot := -1
+		ctx := context.WithValue(context.Background(), zenProxySlotKey{}, &slot)
+		conn, err := zenDialContext(ctx, "tcp", "opencode.ai:443")
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		conn.Close()
+		if slot < 0 || slot > 1 {
+			t.Fatalf("dial %d slot = %d, want 0 or 1", i, slot)
+		}
+		seen[slot] = true
+	}
+	if len(seen) != 2 {
+		t.Fatalf("slots seen = %v, want both 0 and 1 (round_robin)", seen)
+	}
+}
+
+// TestCooldownZenProxyFromCtx：限流冷却归因语义——无槽位/槽位 -1（连接复用）
+// 不冷却任何代理；槽位 1 仅冷却 proxy[1]；无 Retry-After 用默认 10 分钟。
+func TestCooldownZenProxyFromCtx(t *testing.T) {
+	withZenTestConfig(t, func(c *zenConfigData) {
+		c.Proxies = []string{"http://p1.example:1", "http://p2.example:2"}
+		c.ProxyStrategy = "fill"
+	})
+	clearZenProxyCooldownsForTest(t)
+
+	cooldownZenProxyFromCtx(context.Background(), 30*time.Second)
+	if !zenProxyAvailable(0) || !zenProxyAvailable(1) {
+		t.Fatal("no-slot ctx must not cool any proxy")
+	}
+
+	slot := -1
+	ctx := context.WithValue(context.Background(), zenProxySlotKey{}, &slot)
+	cooldownZenProxyFromCtx(ctx, 30*time.Second)
+	if !zenProxyAvailable(0) || !zenProxyAvailable(1) {
+		t.Fatal("slot=-1 (connection reused) must not cool any proxy")
+	}
+
+	slot = 1
+	cooldownZenProxyFromCtx(ctx, 30*time.Second)
+	if !zenProxyAvailable(0) {
+		t.Fatal("proxy[0] must stay available when slot=1")
+	}
+	if zenProxyAvailable(1) {
+		t.Fatal("proxy[1] should be cooled after rate limit with slot=1")
+	}
+
+	clearZenProxyCooldownsForTest(t)
+	slot = 0
+	cooldownZenProxyFromCtx(ctx, 0)
+	if zenProxyAvailable(0) {
+		t.Fatal("proxy[0] should be cooled with default duration when Retry-After absent")
+	}
+}
+
 // ============ P5-6 CONNECT/TLS 握手死线 + socks5 死分支 ============
 
 // hungCONNECTProxy 只吞 CONNECT 请求、永不响应（模拟卡死的出口代理）。
@@ -686,6 +806,48 @@ func TestDialHTTPProxyConnectTimeout(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("dial returned after %v, want ~zenConnectHandshakeTimeout", elapsed)
 	}
+}
+
+// okCONNECTProxy 对每个连接读掉 CONNECT 请求头并回复 200，随后静默丢弃
+// 隧道数据（模拟正常工作的出口代理）。
+func okCONNECTProxy(t *testing.T) net.Addr {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				for {
+					line, err := br.ReadString('\n')
+					if err != nil {
+						return
+					}
+					if line == "\r\n" || line == "\n" {
+						break
+					}
+				}
+				if _, err := c.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+					return
+				}
+				buf := make([]byte, 4096)
+				for {
+					if _, err := c.Read(buf); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return ln.Addr()
 }
 
 // TestDialHTTPProxySuccessTunnelsAndClearsDeadline：CONNECT 200 后隧道可用，

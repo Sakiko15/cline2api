@@ -604,11 +604,15 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("zen request canceled: %w", err)
 		}
-		// 绑定请求上下文：客户端断开时上游请求随之取消（P1-4）
+		// 绑定请求上下文：客户端断开时上游请求随之取消（P1-4）；
+		// 并挂代理索引槽位（P5-7）：本次尝试实际拨号的出口由 zenDialContext
+		// 写回，限流冷却据此归因（连接复用保持 -1 不冷却）
 		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(bodyJSON))
 		if err != nil {
 			return nil, fmt.Errorf("create zen request: %w", err)
 		}
+		proxySlot := -1
+		req = req.WithContext(context.WithValue(req.Context(), zenProxySlotKey{}, &proxySlot))
 		sess, user, ua := freshZenIdentity()
 		req.Header.Set("Authorization", "Bearer "+cfg.Key)
 		req.Header.Set("Content-Type", "application/json")
@@ -655,14 +659,9 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 		}
 
 		if isRateLimited(resp.StatusCode, string(bodyBytes)) {
-			// 冷却当前出口代理（Retry-After 优先，默认 10 分钟；钳制上限 1h）
-			if idx := lastZenProxyIdx(); idx >= 0 {
-				d := clampRetryWait(zerr.retryAfter, maxProxyCooldown)
-				if d <= 0 {
-					d = 10 * time.Minute
-				}
-				cooldownZenProxy(idx, d)
-			}
+			// 冷却本次实际拨号的出口代理（P5-7：ctx 槽位归因；连接复用未拨号时
+			// 不冷却。Retry-After 优先，默认 10 分钟；钳制上限 1h）
+			cooldownZenProxyFromCtx(req.Context(), zerr.retryAfter)
 			if attempt < retries {
 				wait := delay
 				if ra := clampRetryWait(zerr.retryAfter, maxRetryWait); ra > wait {
