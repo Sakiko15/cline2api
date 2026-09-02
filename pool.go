@@ -487,16 +487,76 @@ func pickAccountLocked(p *AccountPool) *Account {
 	return acc
 }
 
+// tokenFlight 账号级刷新单飞（P5-5）：cline refresh grant 会轮换 refresh token，
+// 同账号并发两刷时第二个用旧 token → 4xx → 误标 expired 杀活账号。
+// 键为 AccountID，refs 引用计数防误删（等待者排队期间条目不得被删）。
+var (
+	tokenFlightMu sync.Mutex
+	tokenFlights  = map[string]*tokenFlight{}
+)
+
+type tokenFlight struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// acquireTokenFlight 获取该账号的刷新锁，返回 release 函数。
+// 锁序：flight 锁 → poolMu（refreshAccountToken 内部），全仓无反向路径。
+func acquireTokenFlight(accountID string) func() {
+	tokenFlightMu.Lock()
+	fl := tokenFlights[accountID]
+	if fl == nil {
+		fl = &tokenFlight{}
+		tokenFlights[accountID] = fl
+	}
+	fl.refs++
+	tokenFlightMu.Unlock()
+
+	fl.mu.Lock()
+
+	return func() {
+		fl.mu.Unlock()
+		tokenFlightMu.Lock()
+		fl.refs--
+		if fl.refs == 0 {
+			delete(tokenFlights, accountID)
+		}
+		tokenFlightMu.Unlock()
+	}
+}
+
+// ensureAccountToken 返回可用访问令牌：新鲜则直接返回；否则经账号级单飞
+// 刷新（P5-5：锁内快照消除数据竞争，单飞消除并发重复刷新）。注意
+// refreshAccountToken 本体保持强制刷新语义，供管理端 refresh-all 与测试直调。
 func ensureAccountToken(acc *Account) (string, error) {
-	if acc.AccessToken != "" && time.Now().UnixMilli() < acc.ExpiresAt {
-		return acc.AccessToken, nil
+	poolMu.Lock()
+	token := acc.AccessToken
+	expiresAt := acc.ExpiresAt
+	poolMu.Unlock()
+	if token != "" && time.Now().UnixMilli() < expiresAt {
+		return token, nil
+	}
+
+	release := acquireTokenFlight(acc.AccountID)
+	defer release()
+
+	// 获锁后二次复查：等待期间已被并发刷新成功则直接复用（单飞去重）
+	poolMu.Lock()
+	token = acc.AccessToken
+	expiresAt = acc.ExpiresAt
+	poolMu.Unlock()
+	if token != "" && time.Now().UnixMilli() < expiresAt {
+		return token, nil
 	}
 
 	if err := refreshAccountToken(acc); err != nil {
 		return "", err
 	}
 
-	return acc.AccessToken, nil
+	poolMu.Lock()
+	token = acc.AccessToken
+	poolMu.Unlock()
+	return token, nil
 }
 
 func listAccounts() []*Account {

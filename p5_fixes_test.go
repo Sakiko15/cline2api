@@ -468,3 +468,163 @@ func TestRestartListenerConcurrentConfigRead(t *testing.T) {
 	default:
 	}
 }
+
+// ============ P5-5 token 刷新单飞 ============
+
+// refreshFakeTransport 返回固定刷新响应的 authClient 伪造。
+func refreshFakeTransport(status int, body string, delay time.Duration, calls *int32) http.RoundTripper {
+	return freeModelRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if calls != nil {
+			atomic.AddInt32(calls, 1)
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		return freeTestResponse(req, status, body), nil
+	})
+}
+
+func refreshOKBody() string {
+	return fmt.Sprintf(`{"data":{"accessToken":"fresh","refreshToken":"rt2","expiresAt":%d}}`,
+		time.Now().Add(time.Hour).UnixMilli())
+}
+
+// TestEnsureAccountTokenSingleFlight：过期 token × 8 并发，刷新端点恰好命中
+// 一次，全部拿到新 token（P5-5：修复 refresh grant 轮换下的并发双刷误杀）。
+func TestEnsureAccountTokenSingleFlight(t *testing.T) {
+	acc := &Account{
+		AccountID:    "sf-one",
+		Email:        "sf@example.com",
+		RefreshToken: "rt",
+		AccessToken:  "workos:stale",
+		ExpiresAt:    time.Now().Add(-time.Hour).UnixMilli(),
+		Status:       "active",
+	}
+	withFreeTestEnv(t, acc)
+
+	var calls int32
+	oldAuth := authClient.Transport
+	t.Cleanup(func() { authClient.Transport = oldAuth })
+	authClient.Transport = refreshFakeTransport(http.StatusOK, refreshOKBody(), 20*time.Millisecond, &calls)
+
+	const n = 8
+	var wg sync.WaitGroup
+	results := make([]string, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx], errs[idx] = ensureAccountToken(acc)
+		}(i)
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("refresh calls = %d, want exactly 1 (single-flight)", got)
+	}
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("caller %d error: %v", i, errs[i])
+		}
+		if results[i] != "workos:fresh" {
+			t.Fatalf("caller %d token = %q, want workos:fresh", i, results[i])
+		}
+	}
+}
+
+// TestEnsureAccountTokenFailureSerializedRetries：刷新恒 401 时并发调用方
+// 全部拿到错误、各自串行重试一次（总次数 = 调用方数，非静默去重），账号 expired。
+func TestEnsureAccountTokenFailureSerializedRetries(t *testing.T) {
+	acc := &Account{
+		AccountID:    "sf-fail",
+		Email:        "sff@example.com",
+		RefreshToken: "rt",
+		AccessToken:  "workos:stale",
+		ExpiresAt:    time.Now().Add(-time.Hour).UnixMilli(),
+		Status:       "active",
+	}
+	withFreeTestEnv(t, acc)
+
+	var calls int32
+	oldAuth := authClient.Transport
+	t.Cleanup(func() { authClient.Transport = oldAuth })
+	authClient.Transport = refreshFakeTransport(http.StatusUnauthorized, `{"error":"invalid_grant"}`, 0, &calls)
+
+	const n = 4
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, errs[idx] = ensureAccountToken(acc)
+		}(i)
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&calls); got != n {
+		t.Fatalf("refresh calls = %d, want %d (each waiter retries once)", got, n)
+	}
+	for i := 0; i < n; i++ {
+		if errs[i] == nil {
+			t.Fatalf("caller %d expected error", i)
+		}
+	}
+	if acc.Status != "expired" {
+		t.Fatalf("account status = %q, want expired after 401 rejection", acc.Status)
+	}
+}
+
+// TestEnsureAccountTokenSnapshotNoRace：并发写 token（模拟刷新完成）与
+// ensureAccountToken 快照读，-race 干净（-race 定向）。
+func TestEnsureAccountTokenSnapshotNoRace(t *testing.T) {
+	acc := &Account{
+		AccountID:    "sf-race",
+		Email:        "sfr@example.com",
+		RefreshToken: "rt",
+		AccessToken:  "workos:initial",
+		ExpiresAt:    time.Now().Add(time.Hour).UnixMilli(),
+		Status:       "active",
+	}
+	withFreeTestEnv(t, acc)
+
+	oldAuth := authClient.Transport
+	t.Cleanup(func() { authClient.Transport = oldAuth })
+	authClient.Transport = refreshFakeTransport(http.StatusOK, refreshOKBody(), 0, nil)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				poolMu.Lock()
+				acc.AccessToken = fmt.Sprintf("workos:w%d", i)
+				acc.ExpiresAt = time.Now().Add(time.Hour).UnixMilli()
+				poolMu.Unlock()
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if _, err := ensureAccountToken(acc); err != nil {
+					t.Errorf("ensureAccountToken: %v", err)
+					return
+				}
+			}
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
