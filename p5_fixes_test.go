@@ -1586,3 +1586,16 @@ func TestHandleStreamResponseNormalizesDirtyChunks(t *testing.T) {
 		}
 	}
 }
+
+// ============ P5-12 cline 侧传输空闲连接上限 ============
+
+// TestHTTPTransportIdleConnsPerHost：固定 P5-12 调参（10→100）——默认 10
+// 会让与上游单主机的并发 keep-alive 超出部分用后即弃、每请求重握手。
+func TestHTTPTransportIdleConnsPerHost(t *testing.T) {
+	if httpTransport.MaxIdleConnsPerHost != 100 {
+		t.Fatalf("httpTransport.MaxIdleConnsPerHost = %d, want 100 (P5-12)", httpTransport.MaxIdleConnsPerHost)
+	}
+	if httpTransport.MaxIdleConns != 100 {
+		t.Fatalf("httpTransport.MaxIdleConns = %d, want 100 (per-host cap must not exceed global)", httpTransport.MaxIdleConns)
+	}
+}

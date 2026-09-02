@@ -49,14 +49,17 @@ func readChatBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	return body, true
 }
 
+// httpTransport 的 MaxIdleConnsPerHost 提到 100（P5-12）：与上游单主机的
+// 并发 keep-alive 常态 >10，默认 10 会让超出部分用后即弃、每请求重握手；
+// 仅影响空闲保留数（连接复用上限不变），行为零变化。
 var httpTransport = &http.Transport{
-	Proxy:                http.ProxyFromEnvironment,
-	MaxIdleConns:         100,
-	MaxIdleConnsPerHost:  10,
-	IdleConnTimeout:      90 * time.Second,
-	TLSHandshakeTimeout:  10 * time.Second,
+	Proxy:                 http.ProxyFromEnvironment,
+	MaxIdleConns:          100,
+	MaxIdleConnsPerHost:   100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
-	DisableCompression:   false,
+	DisableCompression:    false,
 }
 
 // httpClient 用于可能长时的流式上游请求：不设 Client.Timeout（会掐断长流），
