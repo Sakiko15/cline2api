@@ -68,16 +68,37 @@ func loadRequestLogs() {
 	requestLogsMu.Unlock()
 }
 
+// requestLogBefore 报告 a 是否应排在 b 之前（时间降序，平局 ID 降序）——
+// pruneRequestLogsLocked 的统一比较器。
+func requestLogBefore(a, b RequestLog) bool {
+	if !a.StartedAt.Equal(b.StartedAt) {
+		return a.StartedAt.After(b.StartedAt)
+	}
+	return a.ID > b.ID
+}
+
+// isRequestLogsSorted O(n) 判定 entries 是否已按统一比较器降序（P5-10）：
+// 有序时 prune 跳过 O(n log n) 全排（历史文件加载路径常态有序；热路径的
+// 「降序头+追加尾」在连接处断序，自然回退全排）。
+func isRequestLogsSorted(entries []RequestLog) bool {
+	for i := 1; i < len(entries); i++ {
+		if requestLogBefore(entries[i], entries[i-1]) {
+			return false
+		}
+	}
+	return true
+}
+
 func pruneRequestLogsLocked(entries []RequestLog) []RequestLog {
 	if len(entries) == 0 {
 		return entries
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		if !entries[i].StartedAt.Equal(entries[j].StartedAt) {
-			return entries[i].StartedAt.After(entries[j].StartedAt)
-		}
-		return entries[i].ID > entries[j].ID
-	})
+	// P5-10：已按统一比较器降序时整段跳过 sort（输出顺序与全排恒等）
+	if !isRequestLogsSorted(entries) {
+		sort.Slice(entries, func(i, j int) bool {
+			return requestLogBefore(entries[i], entries[j])
+		})
+	}
 
 	cutoff := time.Now().Add(-requestLogMaxAge)
 	pruned := entries[:0]
@@ -94,7 +115,9 @@ func pruneRequestLogsLocked(entries []RequestLog) []RequestLog {
 }
 
 func saveRequestLogsLocked() {
-	data, err := json.MarshalIndent(requestLogs, "", "  ")
+	// P5-10：紧凑 Marshal——文件体积约降 40%，防抖落盘序列化成本同步下降；
+	// 消费方（loadRequestLogs / 管理端列表读内存）均无缩进格式依赖
+	data, err := json.Marshal(requestLogs)
 	if err != nil {
 		return
 	}

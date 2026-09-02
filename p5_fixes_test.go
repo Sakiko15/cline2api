@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1341,5 +1343,108 @@ func TestSocks5DialerSupportsDialContext(t *testing.T) {
 	}
 	if _, ok := d.(proxy.ContextDialer); !ok {
 		t.Fatal("proxy.SOCKS5 dialer no longer implements proxy.ContextDialer; removed legacy branch in dialViaProxy was reachable — restore fallback")
+	}
+}
+
+// ============ P5-10 请求日志：紧凑落盘 + prune 有序快路径 ============
+
+func TestIsRequestLogsSorted(t *testing.T) {
+	base := time.Now()
+	entries := []RequestLog{
+		{ID: "req_3", StartedAt: base},
+		{ID: "req_2", StartedAt: base},
+		{ID: "req_1", StartedAt: base.Add(-time.Minute)},
+	}
+	if !isRequestLogsSorted(entries) {
+		t.Fatal("descending (time desc, ID desc tie-break) input reported unsorted")
+	}
+	// 平局 ID 升序 → 无序（比较器要求 ID 降序）
+	if isRequestLogsSorted([]RequestLog{{ID: "req_a", StartedAt: base}, {ID: "req_b", StartedAt: base}}) {
+		t.Fatal("ID-ascending tie reported sorted; comparator requires ID descending")
+	}
+	if isRequestLogsSorted([]RequestLog{{ID: "req_1", StartedAt: base.Add(-time.Minute)}, {ID: "req_2", StartedAt: base}}) {
+		t.Fatal("time-ascending input reported sorted")
+	}
+	if !isRequestLogsSorted(nil) || !isRequestLogsSorted(entries[:1]) {
+		t.Fatal("nil/single-entry input must be sorted")
+	}
+}
+
+// TestPruneRequestLogsKeepsSortedInputOrder：有序输入必须与原全排输出恒等
+// （逐位置相等），且年龄裁剪 + 上限截断照常生效。
+func TestPruneRequestLogsKeepsSortedInputOrder(t *testing.T) {
+	base := time.Now()
+	input := make([]RequestLog, 0, requestLogMaxEntries+20)
+	// 降序：5010 条新 + 10 条 >30d 老条目插在末尾（降序尾部的"最老"区段）
+	for i := 0; i < requestLogMaxEntries+10; i++ {
+		input = append(input, RequestLog{ID: fmt.Sprintf("req_new_%04d", i), StartedAt: base.Add(-time.Duration(i) * time.Millisecond)})
+	}
+	for i := 0; i < 10; i++ {
+		input = append(input, RequestLog{ID: fmt.Sprintf("req_old_%04d", i), StartedAt: base.Add(-requestLogMaxAge - time.Duration(i+1)*time.Hour)})
+	}
+
+	got := pruneRequestLogsLocked(append([]RequestLog(nil), input...))
+
+	// 期望：参照实现（无条件全排 + 相同裁剪）——与旧版行为逐位对照
+	want := append([]RequestLog(nil), input...)
+	want = pruneRequestLogsSortedRef(want)
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	if len(got) != requestLogMaxEntries {
+		t.Fatalf("cap pruning broken: len = %d, want %d", len(got), requestLogMaxEntries)
+	}
+	for i := range got {
+		if got[i].ID != want[i].ID {
+			t.Fatalf("position %d: ID = %q, want %q (sorted fast path diverged from full sort)", i, got[i].ID, want[i].ID)
+		}
+	}
+	if !strings.HasPrefix(got[0].ID, "req_new_0000") || strings.HasPrefix(got[len(got)-1].ID, "req_old_") {
+		t.Fatalf("age pruning broken: first=%q last=%q", got[0].ID, got[len(got)-1].ID)
+	}
+}
+
+// pruneRequestLogsSortedRef 参照实现：无条件全排后做与被测函数相同的
+// 年龄/上限裁剪（对照基准，不调用 isRequestLogsSorted）。
+func pruneRequestLogsSortedRef(entries []RequestLog) []RequestLog {
+	sort.Slice(entries, func(i, j int) bool { return requestLogBefore(entries[i], entries[j]) })
+	cutoff := time.Now().Add(-requestLogMaxAge)
+	pruned := entries[:0]
+	for _, e := range entries {
+		if e.StartedAt.Before(cutoff) {
+			continue
+		}
+		pruned = append(pruned, e)
+	}
+	if len(pruned) > requestLogMaxEntries {
+		pruned = pruned[:requestLogMaxEntries]
+	}
+	return pruned
+}
+
+// TestSaveRequestLogsCompactMarshal：落盘必须是紧凑 JSON（无两空格缩进），
+// 且文件内容可被 loadRequestLogs 的 JSON 语义无损读回。
+func TestSaveRequestLogsCompactMarshal(t *testing.T) {
+	requestLogsMu.Lock()
+	oldLogs, oldDirty := requestLogs, requestLogsDirty
+	requestLogs = []RequestLog{{ID: "req_compact_1", StartedAt: time.Now(), Model: "test-model", Completed: true}}
+	requestLogsDirty = true
+	saveRequestLogsLocked()
+	requestLogs, requestLogsDirty = oldLogs, oldDirty
+	requestLogsMu.Unlock()
+
+	data, err := os.ReadFile(requestLogsPath)
+	if err != nil {
+		t.Fatalf("read request logs file: %v", err)
+	}
+	var entries []RequestLog
+	if err := json.Unmarshal(data, &entries); err != nil {
+		t.Fatalf("compact output must stay valid JSON for the load path: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ID != "req_compact_1" {
+		t.Fatalf("round-trip mismatch: %+v", entries)
+	}
+	if bytes.Contains(data, []byte("\n  ")) {
+		t.Fatalf("file still indented; want compact marshal (%d bytes)", len(data))
 	}
 }
