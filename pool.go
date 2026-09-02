@@ -387,6 +387,17 @@ func pickAccountForModelStrict(model string) *Account {
 }
 
 func pickAccountForModelWithFallback(model string, fallbackToActive bool) *Account {
+	return pickAccountForModelWithFallbackExcept(model, fallbackToActive, nil)
+}
+
+// pickAccountForModelStrictExcept 在严格模式（无回退）基础上跳过 tried 中已试过的账号
+// （P5-2：非 429 的 4xx 不产生冷却，free 链靠 tried 保证每账号每模型至多试一次，
+// 否则 fill 策略会无限重选同一账号、round_robin 轮完复始形成死循环）。
+func pickAccountForModelStrictExcept(model string, tried map[*Account]struct{}) *Account {
+	return pickAccountForModelWithFallbackExcept(model, false, tried)
+}
+
+func pickAccountForModelWithFallbackExcept(model string, fallbackToActive bool, tried map[*Account]struct{}) *Account {
 	if model == "" {
 		return pickAccount()
 	}
@@ -405,9 +416,14 @@ func pickAccountForModelWithFallback(model string, fallbackToActive bool) *Accou
 		return nil
 	}
 
-	// 该模型未冷却的账号列表
+	// 该模型未冷却且未试过的账号列表
 	eligible := make([]*Account, 0, len(active))
 	for _, a := range active {
+		if tried != nil {
+			if _, skip := tried[a]; skip {
+				continue
+			}
+		}
 		until, cool := a.ModelCooldowns[model]
 		if !cool || time.Now().After(until) {
 			if cool {

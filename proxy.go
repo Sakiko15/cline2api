@@ -814,13 +814,23 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool) (*htt
 }
 
 func callFreeClineAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, *Account, error) {
+	var lastErr error
 	for _, model := range freeModelChain {
 		params["model"] = model
+		// tried 按链内模型独立：429 冷却账号本就被资格集排除；非 429 的 4xx
+		// 不产生冷却，靠 tried 保证每账号每模型至多试一次（P5-2）
+		tried := make(map[*Account]struct{})
 		for {
-			acc := pickAccountForModelStrict(model)
+			if err := ctx.Err(); err != nil {
+				// 客户端取消：立即终止，不做徒劳的账号遍历（P1-4 语义保持：
+				// 取消映射为账号不可用错误，不冷却账号）
+				return nil, nil, &clineAccountUnavailableError{err: fmt.Errorf("upstream request canceled: %w", err)}
+			}
+			acc := pickAccountForModelStrictExcept(model, tried)
 			if acc == nil {
 				break
 			}
+			tried[acc] = struct{}{}
 
 			resp, usedAcc, err := callClineAPIWithAccount(ctx, acc, params, stream)
 			if err == nil {
@@ -839,8 +849,15 @@ func callFreeClineAPI(ctx context.Context, params map[string]any, stream bool) (
 				return nil, usedAcc, err
 			}
 			// 4xx（含 429/400/404）：该模型/账号组合被上游拒绝 → 推进下一账号，
-			// 链内账号耗尽后由外层循环尝试下一链模型（P1-11）
+			// 链内账号耗尽后由外层循环尝试下一链模型（P1-11）；
+			// 非 429 的 4xx 记为链尾候选错误（P5-2：修复原地无限重选死循环）
+			if apiErr.statusCode != 429 {
+				lastErr = err
+			}
 		}
+	}
+	if lastErr != nil {
+		return nil, nil, lastErr
 	}
 	return nil, nil, &freeModelUnavailableError{message: "no eligible accounts available for free models"}
 }
