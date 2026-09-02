@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -1446,5 +1447,142 @@ func TestSaveRequestLogsCompactMarshal(t *testing.T) {
 	}
 	if bytes.Contains(data, []byte("\n  ")) {
 		t.Fatalf("file still indented; want compact marshal (%d bytes)", len(data))
+	}
+}
+
+// ============ P5-11 normalize 零分配快路径 + SSE 干净 chunk 原样透传 ============
+
+// sameMapPtr 比较 map 底层存储指针——map 类型本身不可用 == 比较，
+// 通过 reflect 取底层句柄判定「是否同一个 map」。
+func sameMap(a, b map[string]any) bool {
+	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
+}
+
+// TestNormalizeOpenAIResponseFastPathIdentity：无修正命中返回原指针；
+// 剥离键 / tool_calls 注入任一命中走拷贝路径（四层剥离 + 注入逐一验证）。
+func TestNormalizeOpenAIResponseFastPathIdentity(t *testing.T) {
+	clean := map[string]any{
+		"id": "chatcmpl-1",
+		"choices": []any{
+			map[string]any{
+				"index":         0,
+				"delta":         map[string]any{"content": "hello"},
+				"finish_reason": nil,
+			},
+		},
+		"usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 2},
+	}
+	// 快路径恒等：同一 map 引用（底层存储指针相同）
+	if got := normalizeOpenAIResponse(clean); !sameMap(got, clean) {
+		t.Fatal("clean input should hit fast path and return the same map pointer")
+	}
+
+	// 顶层剥离键
+	withTop := map[string]any{"id": "x", "provider_metadata": map[string]any{"k": "v"}, "choices": []any{}}
+	if r := normalizeOpenAIResponse(withTop); sameMap(r, withTop) {
+		t.Fatal("top-level provider_metadata must trigger copy path")
+	}
+	if _, has := normalizeOpenAIResponse(withTop)["provider_metadata"]; has {
+		t.Fatal("top-level provider_metadata not stripped")
+	}
+
+	// choice 层剥离键
+	withChoice := map[string]any{"choices": []any{map[string]any{"index": 0, "proxy_metadata": 1}}}
+	if _, has := normalizeOpenAIResponse(withChoice)["choices"].([]any)[0].(map[string]any)["proxy_metadata"]; has {
+		t.Fatal("choice-level proxy_metadata not stripped")
+	}
+
+	// message 层剥离键
+	withMsg := map[string]any{"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "provider_metadata": 1, "content": "hi"}}}}
+	msgOut := normalizeOpenAIResponse(withMsg)["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	if _, has := msgOut["provider_metadata"]; has {
+		t.Fatal("message-level provider_metadata not stripped")
+	}
+	if msgOut["content"] != "hi" {
+		t.Fatalf("message content changed: %v", msgOut["content"])
+	}
+
+	// delta 层 tool_calls 注入（content == nil → content = ""）
+	withInject := map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{map[string]any{"id": "c1"}}}}}}
+	deltaOut := normalizeOpenAIResponse(withInject)["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)
+	if s, ok := deltaOut["content"].(string); !ok || s != "" {
+		t.Fatalf("tool_calls injection missing: content = %#v, want empty string", deltaOut["content"])
+	}
+
+	// content 显式 nil 仍满足注入条件（m["content"] == nil）——归入慢路径
+	noInject := map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{map[string]any{"id": "c1"}}, "content": nil}}}}
+	if r := normalizeOpenAIResponse(noInject); sameMap(r, noInject) {
+		t.Fatal("delta.tool_calls with nil content must trigger injection (copy path)")
+	}
+
+	// content 已存在时不注入（无修正命中 → 快路径原指针）
+	hasContent := map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"tool_calls": []any{map[string]any{"id": "c1"}}, "content": "partial"}}}}
+	if r := normalizeOpenAIResponse(hasContent); !sameMap(r, hasContent) {
+		t.Fatal("delta.tool_calls with existing content should hit fast path (no injection needed)")
+	}
+}
+
+// sseUpstreamResponse 构造 handleStreamResponse 的上游响应参数。
+func sseUpstreamResponse(t *testing.T, body string) *http.Response {
+	t.Helper()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+// TestHandleStreamResponsePassthroughBytesForCleanChunks：干净 chunk 逐字节
+// 原样透传（含 Go 重序列化必然改写的键序/转义形态）。
+func TestHandleStreamResponsePassthroughBytesForCleanChunks(t *testing.T) {
+	cleanPayload := `{"zzz_last":1,"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},"choices":[{"delta":{"content":"hi"}}],"id":"x"}`
+	dirtyPayload := `{"choices":[{"delta":{"tool_calls":[{"id":"c1"}]}}]}`
+	body := "data: " + cleanPayload + "\n\n" + "data: " + dirtyPayload + "\n\n" + "data: [DONE]\n\n"
+
+	rec := httptest.NewRecorder()
+	handleStreamResponse(rec, sseUpstreamResponse(t, body), nil, &RequestLog{ID: "req_stream_1", Model: "test", StartedAt: time.Now()})
+
+	out := rec.Body.String()
+	if !strings.Contains(out, "data: "+cleanPayload+"\n\n") {
+		t.Fatalf("clean chunk not passed through byte-exact (re-serialized?)\nbody: %s", out)
+	}
+	// 脏 chunk 走重序列化：注入生效
+	if !strings.Contains(out, `"content":""`) {
+		t.Fatalf("dirty chunk not normalized (missing injected content)\nbody: %s", out)
+	}
+	if !strings.Contains(out, "data: [DONE]\n\n") {
+		t.Fatalf("[DONE] sentinel missing\nbody: %s", out)
+	}
+}
+
+// TestHandleStreamResponseNormalizesDirtyChunks：命中剥离/解包的 chunk 仍
+// 走重序列化，畸形行与 [DONE] 原样保留。
+func TestHandleStreamResponseNormalizesDirtyChunks(t *testing.T) {
+	body := "data: {\"provider_metadata\":{\"a\":1},\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n" +
+		"data: {\"data\":{\"id\":\"env1\",\"choices\":[{\"delta\":{\"content\":\"wrapped\"}}]}}\n\n" +
+		": keep-alive comment\n" +
+		"data: not-json\n\n" +
+		"data: [DONE]\n\n"
+
+	rec := httptest.NewRecorder()
+	handleStreamResponse(rec, sseUpstreamResponse(t, body), nil, &RequestLog{ID: "req_stream_2", Model: "test", StartedAt: time.Now()})
+
+	out := rec.Body.String()
+	// 剥离键命中 → 重序列化后不再含 provider_metadata
+	if strings.Contains(out, "provider_metadata") {
+		t.Fatalf("strip key survived normalization\nbody: %s", out)
+	}
+	if !strings.Contains(out, `"content":"ok"`) {
+		t.Fatalf("normalized chunk content missing\nbody: %s", out)
+	}
+	// 信封解包命中 → data 键被展开
+	if !strings.Contains(out, `"id":"env1"`) {
+		t.Fatalf("envelope unwrapping missing\nbody: %s", out)
+	}
+	// 畸形行 / 注释 / [DONE] 原样
+	for _, want := range []string{": keep-alive comment", "data: not-json", "data: [DONE]"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("verbatim line %q missing\nbody: %s", want, out)
+		}
 	}
 }

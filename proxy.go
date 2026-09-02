@@ -1398,22 +1398,35 @@ func handleStreamResponse(w http.ResponseWriter, upstream *http.Response, acc *A
 			var obj map[string]any
 			if err := json.Unmarshal([]byte(payload), &obj); err == nil {
 				// Some Cline responses wrap in {data: {...}}
+				unwrapped := false
+				target := obj
 				if data, ok := obj["data"]; ok {
 					if d, ok := data.(map[string]any); ok {
 						if _, hasChoices := d["choices"]; hasChoices {
-							obj = d
+							target = d
+							unwrapped = true
 						}
 						if _, hasID := d["id"]; hasID {
-							obj = d
+							target = d
+							unwrapped = true
 						}
 					}
 				}
-				normalized := normalizeOpenAIResponse(obj)
+				normalized := normalizeOpenAIResponse(target)
 				if usage := parseTokenUsage(normalized["usage"]); usage.Valid {
 					latestUsage = mergeTokenUsage(latestUsage, usage)
 				}
 				if firstOutputAt.IsZero() && hasFirstOutput(normalized) {
 					firstOutputAt = time.Now()
+				}
+				// P5-11：干净 chunk（未解包信封、零修正命中）原样透传上游
+				// 字节——JSON 值恒等（差异仅键序/转义/数字书写），省去逐 chunk
+				// 的 Go 重序列化；命中修正或解包仍走重序列化，语义修正无一丢失
+				if !unwrapped && !needsNormalize(target) {
+					if !writeChunk([]byte("data: " + payload + "\n\n")) {
+						break
+					}
+					continue
 				}
 				if normBytes, err := json.Marshal(normalized); err == nil {
 					if !writeChunk([]byte("data: " + string(normBytes) + "\n\n")) {
@@ -2545,7 +2558,60 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 	log.Printf("  anthropic stream done: hasText=%v tools=%d reason=%s", hasText, len(pendingTools), stopReason)
 }
 
+// hasStripKeys 报告 m 是否含会被剥离的 provider/proxy_metadata 键。
+func hasStripKeys(m map[string]any) bool {
+	_, a := m["provider_metadata"]
+	_, b := m["proxy_metadata"]
+	return a || b
+}
+
+// needsMessageNormalize：message/delta 层的修正条件——剥离键或
+// tool_calls 非空且 content 为 nil 的注入。sanitizeContent 恒等不计。
+func needsMessageNormalize(m map[string]any) bool {
+	if hasStripKeys(m) {
+		return true
+	}
+	if tc, ok := m["tool_calls"].([]any); ok && len(tc) > 0 && m["content"] == nil {
+		return true
+	}
+	return false
+}
+
+// needsNormalize O(浅层) 判定 obj 是否命中 normalizeOpenAIResponse 的任何
+// 修正（P5-11）：顶层/choice/message/delta 四层剥离键，或 message/delta 的
+// tool_calls 内容注入。全不命中时 normalizeOpenAIResponse 的输出与输入
+// JSON 值恒等（sanitizeContent 恒等），可零分配返回原 map。
+func needsNormalize(obj map[string]any) bool {
+	if hasStripKeys(obj) {
+		return true
+	}
+	choices, ok := obj["choices"].([]any)
+	if !ok {
+		return false
+	}
+	for _, ch := range choices {
+		c, ok := ch.(map[string]any)
+		if !ok {
+			continue // 非对象 choice 原样追加，无修正
+		}
+		if hasStripKeys(c) {
+			return true
+		}
+		if msg, ok := c["message"].(map[string]any); ok && needsMessageNormalize(msg) {
+			return true
+		}
+		if delta, ok := c["delta"].(map[string]any); ok && needsMessageNormalize(delta) {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeOpenAIResponse(obj map[string]any) map[string]any {
+	// P5-11 零分配快路径：无任何修正命中时返回原 map（输出 JSON 值恒等）
+	if !needsNormalize(obj) {
+		return obj
+	}
 	out := make(map[string]any)
 	for k, v := range obj {
 		if k == "provider_metadata" || k == "proxy_metadata" {
