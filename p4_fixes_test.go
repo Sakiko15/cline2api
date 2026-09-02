@@ -617,3 +617,50 @@ func TestOpenAIToAnthropicThinkingFirst(t *testing.T) {
 		t.Fatal("thinking block should not carry a fabricated signature")
 	}
 }
+
+// ---- P4-6：passThroughKeys 扩充 OpenAI 规范字段直通 ----
+
+func TestBuildUpstreamBodyPassesThroughNewOpenAIFields(t *testing.T) {
+	values := map[string]any{
+		"service_tier":       "flex",
+		"store":              true,
+		"verbosity":          "low",
+		"modalities":         []any{"text"},
+		"audio":              map[string]any{"voice": "alloy", "format": "mp3"},
+		"prediction":         map[string]any{"type": "content", "content": "x"},
+		"web_search_options": map[string]any{"search_context_size": "low"},
+		"safety_identifier":  "user-abc",
+		"prompt_cache_key":   "cache-123",
+	}
+	params := map[string]any{
+		"model":    "m",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	for k, v := range values {
+		params[k] = v
+	}
+	body := buildUpstreamBody(params, false)
+	for k, want := range values {
+		got, ok := body[k]
+		if !ok {
+			t.Errorf("key %q missing from upstream body", k)
+			continue
+		}
+		gotJSON, _ := json.Marshal(got)
+		wantJSON, _ := json.Marshal(want)
+		if string(gotJSON) != string(wantJSON) {
+			t.Errorf("key %q = %s, want %s", k, gotJSON, wantJSON)
+		}
+	}
+
+	// 不带这些键时上游 body 不出现
+	plain := buildUpstreamBody(map[string]any{
+		"model":    "m",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}, false)
+	for k := range values {
+		if _, ok := plain[k]; ok {
+			t.Errorf("key %q should be absent when not requested", k)
+		}
+	}
+}

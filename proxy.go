@@ -253,6 +253,11 @@ var passThroughKeys = []string{
 	"temperature", "top_p", "top_k", "stop", "presence_penalty", "frequency_penalty",
 	"response_format", "user", "n", "logit_bias", "seed", "logprobs", "top_logprobs",
 	"stream_options", "metadata",
+	// P4-6：OpenAI 规范新增字段直通（上游按需忽略不认识的字段）。
+	// moderation / prompt_cache_options 不透传：前者是独立端点语义，后者
+	// 属于基础设施路由提示，透传无收益。
+	"service_tier", "store", "verbosity", "modalities", "audio", "prediction",
+	"web_search_options", "safety_identifier", "prompt_cache_key",
 }
 
 type chatRequest struct {
