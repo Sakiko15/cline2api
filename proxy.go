@@ -1464,7 +1464,7 @@ type anthropicMsg struct {
 }
 
 type toolAccumulator struct {
-	index    int    // Anthropic content_block index（content_block_start 时分配，不复用上游序号）
+	index    int // Anthropic content_block index（content_block_start 时分配，不复用上游序号）
 	id       string
 	name     string
 	args     string
@@ -1628,6 +1628,9 @@ func mapAnthropicToolChoice(raw json.RawMessage) any {
 
 // imageUnsupportedOnce P4-4：不支持的 image source 形态只告警一次，避免刷日志
 var imageUnsupportedOnce sync.Once
+
+// reasoningDroppedOnce P4-5：工具块打开期间的推理分片丢弃只告警一次
+var reasoningDroppedOnce sync.Once
 
 // imageBlockToOpenAI 把 Anthropic image 块转成 OpenAI image_url part（P4-4）。
 // base64 → data URL；url source → 原样透传；其余/缺字段形态返回 false 由调用方告警。
@@ -1831,40 +1834,56 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 	}
 
 	text := ""
+	reasoning := ""
 	if msg != nil {
 		if c, ok := msg["content"].(string); ok {
 			text = sanitizeContent(c)
 		}
+		// P4-5：上游 reasoning_content → thinking 块；不带 signature 字段
+		//（透传响应无签名语义，伪造无意义，官方 SDK 建模上 signature 可缺省）
+		if r, ok := msg["reasoning_content"].(string); ok {
+			reasoning = sanitizeContent(r)
+		}
 	}
 
-	contentBlocks := []any{map[string]any{"type": "text", "text": text}}
-
-	// Convert tool_calls to Anthropic tool_use blocks
+	hasToolCalls := false
 	if msg != nil {
 		if tc, ok := msg["tool_calls"].([]any); ok && len(tc) > 0 {
-			contentBlocks = []any{} // Clear text-only, proper response has both
-			if text != "" {
-				contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": text})
-			}
-			for _, tcItem := range tc {
-				if tcMap, ok := tcItem.(map[string]any); ok {
-					funcData, _ := tcMap["function"].(map[string]any)
-					input := funcData["arguments"]
-					// OpenAI arguments is a JSON string; Anthropic expects an object
-					if argsStr, ok := input.(string); ok {
-						var argsObj any
-						if json.Unmarshal([]byte(argsStr), &argsObj) == nil {
-							input = argsObj
-						}
+			hasToolCalls = true
+		}
+	}
+
+	// thinking 块恒在 content 首位（Anthropic 惯例：思考先于回答）
+	var contentBlocks []any
+	if reasoning != "" {
+		contentBlocks = append(contentBlocks, map[string]any{"type": "thinking", "thinking": reasoning})
+	}
+	// 无工具调用时保持旧行为：恒带文本块（可为空串）
+	if !hasToolCalls || text != "" {
+		contentBlocks = append(contentBlocks, map[string]any{"type": "text", "text": text})
+	}
+
+	// Convert tool_calls to Anthropic tool_use blocks
+	if hasToolCalls {
+		tc, _ := msg["tool_calls"].([]any)
+		for _, tcItem := range tc {
+			if tcMap, ok := tcItem.(map[string]any); ok {
+				funcData, _ := tcMap["function"].(map[string]any)
+				input := funcData["arguments"]
+				// OpenAI arguments is a JSON string; Anthropic expects an object
+				if argsStr, ok := input.(string); ok {
+					var argsObj any
+					if json.Unmarshal([]byte(argsStr), &argsObj) == nil {
+						input = argsObj
 					}
-					block := map[string]any{
-						"type":  "tool_use",
-						"id":    tcMap["id"],
-						"name":  funcData["name"],
-						"input": input,
-					}
-					contentBlocks = append(contentBlocks, block)
 				}
+				block := map[string]any{
+					"type":  "tool_use",
+					"id":    tcMap["id"],
+					"name":  funcData["name"],
+					"input": input,
+				}
+				contentBlocks = append(contentBlocks, block)
 			}
 		}
 	}
@@ -2103,12 +2122,14 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		},
 	})
 
-	// content_block 统一 index 计数：文本与工具块共用一个递增计数器，
+	// content_block 统一 index 计数：文本/思考/工具块共用一个递增计数器，
 	// 保证同一条流内 index 唯一（Anthropic 契约：块按 index 顺序 open→close）。
 	nextBlockIdx := 0
 	textIdx := -1
 	hasText := false
 	textOpen := false
+	thinkIdx := -1
+	thinkingOpen := false
 	pendingTools := map[int]*toolAccumulator{}
 	var openTool *toolAccumulator
 
@@ -2119,6 +2140,15 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 				"index": textIdx,
 			})
 			textOpen = false
+		}
+	}
+	closeThinkingBlock := func() {
+		if thinkingOpen {
+			emit("content_block_stop", map[string]any{
+				"type":  "content_block_stop",
+				"index": thinkIdx,
+			})
+			thinkingOpen = false
 		}
 	}
 	closeOpenTool := func() {
@@ -2135,8 +2165,9 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 		if acc.started {
 			return
 		}
-		// 块必须顺序开闭：先收掉还开着的文本块与前一个工具块
+		// 块必须顺序开闭：先收掉还开着的文本块/思考块与前一个工具块
 		closeTextBlock()
+		closeThinkingBlock()
 		closeOpenTool()
 		acc.started = true
 		acc.open = true
@@ -2244,10 +2275,46 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 			delta = choice
 		}
 
+		// Reasoning content → thinking 块（P4-5）。懒开：首个推理分片到达时开新块；
+		// 发 thinking_delta、不发 signature_delta（透传无签名语义）。
+		// 工具块打开期间到达的推理分片丢弃——关闭工具块会截断 input_json_delta。
+		if r, ok := delta["reasoning_content"].(string); ok && r != "" {
+			if openTool != nil && openTool.open {
+				reasoningDroppedOnce.Do(func() {
+					log.Printf("  anthropic stream: dropping reasoning_content while tool block open")
+				})
+			} else {
+				closeTextBlock()
+				if !thinkingOpen {
+					thinkingOpen = true
+					thinkIdx = nextBlockIdx
+					nextBlockIdx++
+					emit("content_block_start", map[string]any{
+						"type":  "content_block_start",
+						"index": thinkIdx,
+						"content_block": map[string]any{
+							"type":     "thinking",
+							"thinking": "",
+						},
+					})
+				}
+				emit("content_block_delta", map[string]any{
+					"type":  "content_block_delta",
+					"index": thinkIdx,
+					"delta": map[string]any{
+						"type":     "thinking_delta",
+						"thinking": sanitizeContent(r),
+					},
+				})
+			}
+		}
+
 		// Text content delta
 		if c, ok := delta["content"].(string); ok && c != "" {
 			if !hasText {
 				hasText = true
+				// 块顺序开闭：首个文本分片前先收掉思考块
+				closeThinkingBlock()
 				textIdx = nextBlockIdx
 				nextBlockIdx++
 				textOpen = true
@@ -2335,6 +2402,7 @@ func handleAnthropicStream(w http.ResponseWriter, upstream *http.Response, acc *
 
 	// 流结束：关闭未闭合块；从未 started 的工具块按上游 index 确定性顺序补发完整三段
 	closeTextBlock()
+	closeThinkingBlock()
 	closeOpenTool()
 	toolOrder := make([]int, 0, len(pendingTools))
 	for idx := range pendingTools {

@@ -451,3 +451,169 @@ func TestAnthropicMessagesImageForwarded(t *testing.T) {
 		t.Fatalf("upstream data URL = %v", got)
 	}
 }
+
+// ---- P4-5：reasoning_content → thinking 块 ----
+
+func TestAnthropicStreamThinkingDeltas(t *testing.T) {
+	chunks := []string{
+		sseChunk(`{"choices":[{"delta":{"reasoning_content":"let me think "}}]}`),
+		sseChunk(`{"choices":[{"delta":{"reasoning_content":"about it"}}]}`),
+		sseChunk(`{"choices":[{"delta":{"content":"answer"}}],"finish_reason":null}`),
+		sseChunk(`{"choices":[{"delta":{}},"finish_reason":"stop"}]}`),
+		"data: [DONE]\n\n",
+	}
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(strings.Join(chunks, ""))),
+		Header:     make(http.Header),
+	}
+	rec := httptest.NewRecorder()
+	handleAnthropicStream(rec, upstream, nil, &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "m"})
+
+	events := parseSSEEvents(rec.Body.String())
+	var thinking strings.Builder
+	var thinkingIdx, textIdx = -1, -1
+	blockStarts := map[int]string{}
+	for _, e := range events {
+		var data map[string]any
+		if json.Unmarshal([]byte(e[1]), &data) != nil {
+			continue
+		}
+		switch e[0] {
+		case "content_block_start":
+			idx := int(data["index"].(float64))
+			cb := data["content_block"].(map[string]any)
+			blockStarts[idx] = cb["type"].(string)
+			if cb["type"] == "thinking" {
+				thinkingIdx = idx
+			}
+			if cb["type"] == "text" {
+				textIdx = idx
+			}
+		case "content_block_delta":
+			d := data["delta"].(map[string]any)
+			if d["type"] == "thinking_delta" {
+				if int(data["index"].(float64)) != thinkingIdx {
+					t.Fatalf("thinking_delta index mismatch: %v vs %d", data["index"], thinkingIdx)
+				}
+				thinking.WriteString(d["thinking"].(string))
+			}
+			if d["type"] == "signature_delta" {
+				t.Fatal("signature_delta should not be emitted")
+			}
+		}
+	}
+	if thinking.String() != "let me think about it" {
+		t.Fatalf("thinking = %q", thinking.String())
+	}
+	if blockStarts[thinkingIdx] != "thinking" || blockStarts[textIdx] != "text" {
+		t.Fatalf("block types wrong: %v", blockStarts)
+	}
+	if thinkingIdx != 0 || textIdx != 1 {
+		t.Fatalf("indexes: thinking=%d text=%d, want 0/1 (thinking first)", thinkingIdx, textIdx)
+	}
+	// thinking 块必须在 text 块开启前关闭
+	sawThinkingStop := false
+	for _, e := range events {
+		var data map[string]any
+		if json.Unmarshal([]byte(e[1]), &data) != nil {
+			continue
+		}
+		if e[0] == "content_block_stop" && int(data["index"].(float64)) == thinkingIdx {
+			sawThinkingStop = true
+		}
+		if e[0] == "content_block_start" && int(data["index"].(float64)) == textIdx && !sawThinkingStop {
+			t.Fatal("text block started before thinking block closed")
+		}
+	}
+	if !sawThinkingStop {
+		t.Fatal("thinking block never closed")
+	}
+	// message_stop 仍正常发出
+	last := events[len(events)-1]
+	if last[0] != "message_stop" {
+		t.Fatalf("last event = %s, want message_stop", last[0])
+	}
+}
+
+// 工具块打开期间到达的 reasoning 分片被丢弃，工具参数必须完整无损
+func TestAnthropicStreamReasoningAfterToolDropped(t *testing.T) {
+	fullArgs := `{"path": "/tmp/a"}`
+	chunks := []string{
+		sseChunk(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"pa"}}]}}]}`),
+		sseChunk(`{"choices":[{"delta":{"reasoning_content":"should be dropped"}}]}`),
+		sseChunk(`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\": \"/tmp/a\"}"}}]}}]}`),
+		sseChunk(`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`),
+		"data: [DONE]\n\n",
+	}
+	upstream := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(strings.Join(chunks, ""))),
+		Header:     make(http.Header),
+	}
+	rec := httptest.NewRecorder()
+	handleAnthropicStream(rec, upstream, nil, &RequestLog{StartedAt: time.Now(), Protocol: "anthropic", Model: "m"})
+
+	events := parseSSEEvents(rec.Body.String())
+	var argsJSON strings.Builder
+	for _, e := range events {
+		var data map[string]any
+		if json.Unmarshal([]byte(e[1]), &data) != nil {
+			continue
+		}
+		if e[0] == "content_block_delta" {
+			d := data["delta"].(map[string]any)
+			if d["type"] == "thinking_delta" {
+				t.Fatal("reasoning fragment should be dropped while tool block open")
+			}
+			if d["type"] == "input_json_delta" {
+				argsJSON.WriteString(d["partial_json"].(string))
+			}
+		}
+	}
+	if argsJSON.String() != fullArgs {
+		t.Fatalf("tool args = %q, want %q (must survive dropped reasoning)", argsJSON.String(), fullArgs)
+	}
+}
+
+// 非流式：reasoning_content → thinking 块置于 content 首位
+func TestOpenAIToAnthropicThinkingFirst(t *testing.T) {
+	mk := func(extra map[string]any) map[string]any {
+		message := map[string]any{"content": "answer"}
+		for k, v := range extra {
+			message[k] = v
+		}
+		return map[string]any{"choices": []any{map[string]any{
+			"finish_reason": "stop", "message": message,
+		}}}
+	}
+	// 纯文本：[thinking, text]
+	out := openAIToAnthropic(mk(map[string]any{"reasoning_content": "step by step"}))
+	blocks := out["content"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("want [thinking, text], got %v", blocks)
+	}
+	if blocks[0].(map[string]any)["type"] != "thinking" || blocks[0].(map[string]any)["thinking"] != "step by step" {
+		t.Fatalf("first block = %v, want thinking", blocks[0])
+	}
+	if blocks[1].(map[string]any)["type"] != "text" {
+		t.Fatalf("second block = %v, want text", blocks[1])
+	}
+	// 带工具调用：[thinking, text, tool_use]
+	out = openAIToAnthropic(mk(map[string]any{
+		"reasoning_content": "need tool",
+		"tool_calls":        []any{map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "f", "arguments": "{}"}}},
+	}))
+	blocks = out["content"].([]any)
+	if len(blocks) != 3 {
+		t.Fatalf("want [thinking, text, tool_use], got %v", blocks)
+	}
+	if blocks[0].(map[string]any)["type"] != "thinking" ||
+		blocks[1].(map[string]any)["type"] != "text" ||
+		blocks[2].(map[string]any)["type"] != "tool_use" {
+		t.Fatalf("block order wrong: %v", blocks)
+	}
+	if _, hasSig := blocks[0].(map[string]any)["signature"]; hasSig {
+		t.Fatal("thinking block should not carry a fabricated signature")
+	}
+}
