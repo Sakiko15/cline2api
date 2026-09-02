@@ -1707,9 +1707,18 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 						}
 						toolCalls = append(toolCalls, tc)
 					case "tool_result":
+						content := b["content"]
+						// is_error 仅在 string content 上加前缀传递（P4-3）：OpenAI tool
+						// 消息没有 is_error 字段，丢弃标记会让模型把工具失败当成功；
+						// array 形态保持原样，避免 reshaping 破坏结构化结果
+						if isErr, _ := b["is_error"].(bool); isErr {
+							if s, ok := content.(string); ok {
+								content = "[tool_error] " + s
+							}
+						}
 						toolResults = append(toolResults, map[string]any{
 							"role":         "tool",
-							"content":      b["content"],
+							"content":      content,
 							"tool_call_id": b["tool_use_id"],
 						})
 					}

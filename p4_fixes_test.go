@@ -229,3 +229,46 @@ func TestAnthropicToOpenAIToolResultOnlyNoTrailingUser(t *testing.T) {
 		t.Fatalf("message should be tool role: %v", m)
 	}
 }
+
+// ---- P4-3：tool_result is_error 以内容前缀传递 ----
+
+func TestAnthropicToOpenAIToolResultErrorPrefix(t *testing.T) {
+	mk := func(isErr any) anthropicReq {
+		req := anthropicReq{Model: "m", MaxTokens: 100}
+		block := map[string]any{"type": "tool_result", "tool_use_id": "call_1", "content": "boom happened"}
+		if isErr != nil {
+			block["is_error"] = isErr
+		}
+		req.Messages = []anthropicMsg{{Role: "user", Content: []any{block}}}
+		return req
+	}
+	// true + string → 前缀
+	out := anthropicToOpenAI(mk(true))
+	m := out["messages"].([]any)[0].(map[string]any)
+	if m["content"] != "[tool_error] boom happened" {
+		t.Fatalf("is_error string content = %v, want prefixed", m["content"])
+	}
+	// false → 原样
+	out = anthropicToOpenAI(mk(false))
+	m = out["messages"].([]any)[0].(map[string]any)
+	if m["content"] != "boom happened" {
+		t.Fatalf("is_error=false content = %v, want unchanged", m["content"])
+	}
+	// 缺省 → 原样
+	out = anthropicToOpenAI(mk(nil))
+	m = out["messages"].([]any)[0].(map[string]any)
+	if m["content"] != "boom happened" {
+		t.Fatalf("absent is_error content = %v, want unchanged", m["content"])
+	}
+	// true + 非 string content → 不 reshaping
+	req := anthropicReq{Model: "m", MaxTokens: 100}
+	req.Messages = []anthropicMsg{{Role: "user", Content: []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "c", "is_error": true,
+			"content": []any{map[string]any{"type": "text", "text": "structured error"}}},
+	}}}
+	out = anthropicToOpenAI(req)
+	m = out["messages"].([]any)[0].(map[string]any)
+	if _, ok := m["content"].([]any); !ok {
+		t.Fatalf("array content should stay array, got %T: %v", m["content"], m["content"])
+	}
+}
